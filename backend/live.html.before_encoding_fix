@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dá»‹ch giá»ng nĂ³i trá»±c tiáº¿p</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { max-width: 900px; margin: 32px auto; padding: 0 18px; color: #17202a; }
+    h1 { margin-bottom: 8px; }
+    .controls, .card { border: 1px solid #d7dee8; border-radius: 12px; padding: 18px; margin: 16px 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    select, button { font: inherit; padding: 10px 14px; border-radius: 8px; }
+    button { border: 0; cursor: pointer; color: white; background: #1769d2; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    #stop { background: #b42318; }
+    #status { color: #475467; }
+    .label { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: #667085; }
+    .text { min-height: 54px; white-space: pre-wrap; line-height: 1.55; font-size: 1.08rem; }
+    #translated { color: #075e3c; }
+    #error { color: #b42318; white-space: pre-wrap; }
+    .hint { color: #667085; font-size: .92rem; }
+  </style>
+</head>
+<body>
+  <h1>Dá»‹ch giá»ng nĂ³i trá»±c tiáº¿p</h1>
+  <p class="hint">Cho phĂ©p trĂ¬nh duyá»‡t dĂ¹ng microphone. NĂ³i tá»± nhiĂªn; báº£n dá»‹ch sáº½ hiá»‡n vĂ  phĂ¡t Ă¢m thanh khi Gemini tráº£ káº¿t quáº£.</p>
+
+  <div class="controls">
+    <label for="target">Dá»‹ch sang</label>
+    <select id="target">
+      <option value="vi">Tiáº¿ng Viá»‡t</option>
+      <option value="en">English</option>
+    </select>
+    <button id="start">Báº¯t Ä‘áº§u</button>
+    <button id="stop" disabled>Dá»«ng</button>
+    <span id="status">ChÆ°a káº¿t ná»‘i</span>
+  </div>
+
+  <div class="card">
+    <div class="label">Lá»i nĂ³i Ä‘Æ°á»£c nháº­n dáº¡ng</div>
+    <div id="source" class="text"></div>
+  </div>
+  <div class="card">
+    <div class="label">Báº£n dá»‹ch</div>
+    <div id="translated" class="text"></div>
+  </div>
+  <div id="error"></div>
+
+  <script>
+    const startButton = document.getElementById('start');
+    const stopButton = document.getElementById('stop');
+    const targetSelect = document.getElementById('target');
+    const statusEl = document.getElementById('status');
+    const sourceEl = document.getElementById('source');
+    const translatedEl = document.getElementById('translated');
+    const errorEl = document.getElementById('error');
+
+    let socket;
+    let audioContext;
+    let microphone;
+    let mediaStream;
+    let processor;
+    let muteGain;
+    let sourceBuffer = '';
+    let translatedBuffer = '';
+    let pcmBuffer = [];
+    let nextPlaybackTime = 0;
+    let stopFallbackTimer;
+
+    function setRunning(running) {
+      startButton.disabled = running;
+      stopButton.disabled = !running;
+      targetSelect.disabled = running;
+    }
+
+    function appendText(which, text) {
+      if (!text) return;
+      if (which === 'source') {
+        sourceBuffer += text;
+        sourceEl.textContent = sourceBuffer;
+      } else {
+        translatedBuffer += text;
+        translatedEl.textContent = translatedBuffer;
+      }
+    }
+
+    function sendPcmChunk(samples) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const pcm = new Int16Array(samples.length);
+      for (let i = 0; i < samples.length; i++) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        pcm[i] = value < 0 ? value * 32768 : value * 32767;
+      }
+      socket.send(pcm.buffer);
+    }
+
+    function flushPcmBuffer() {
+      if (pcmBuffer.length) sendPcmChunk(pcmBuffer.splice(0));
+    }
+
+    function downsampleAndSend(input, inputRate) {
+      const ratio = inputRate / 16000;
+      const outputCount = Math.floor(input.length / ratio);
+      for (let i = 0; i < outputCount; i++) {
+        const position = i * ratio;
+        const left = Math.floor(position);
+        const fraction = position - left;
+        const right = Math.min(left + 1, input.length - 1);
+        pcmBuffer.push(input[left] * (1 - fraction) + input[right] * fraction);
+      }
+
+      while (pcmBuffer.length >= 1600) {
+        sendPcmChunk(pcmBuffer.splice(0, 1600));
+      }
+    }
+
+    function playPcmBase64(encoded) {
+      const binary = atob(encoded);
+      const sampleCount = Math.floor(binary.length / 2);
+      if (!sampleCount) return;
+      const buffer = audioContext.createBuffer(1, sampleCount, 24000);
+      const channel = buffer.getChannelData(0);
+      const view = new DataView(new ArrayBuffer(binary.length));
+      for (let i = 0; i < binary.length; i++) {
+        view.setUint8(i, binary.charCodeAt(i));
+      }
+      for (let i = 0; i < sampleCount; i++) {
+        channel[i] = view.getInt16(i * 2, true) / 32768;
+      }
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      const startAt = Math.max(audioContext.currentTime + 0.03, nextPlaybackTime);
+      source.start(startAt);
+      nextPlaybackTime = startAt + buffer.duration;
+    }
+
+    function handleServerMessage(event) {
+      if (event.target !== socket) return;
+      const message = JSON.parse(event.data);
+      if (message.type === 'input_transcription') appendText('source', message.text);
+      if (message.type === 'output_transcription') appendText('translated', message.text);
+      if (message.type === 'translated_audio') playPcmBase64(message.data);
+      if (message.type === 'error') {
+        errorEl.textContent = message.message;
+        statusEl.textContent = 'CĂ³ lá»—i';
+      }
+      if (message.type === 'session_complete' || message.type === 'stream_stopped') {
+        clearTimeout(stopFallbackTimer);
+        statusEl.textContent = 'ÄĂ£ dá»«ng';
+        const finishedSocket = socket;
+        socket = null;
+        cleanupAudio();
+        setRunning(false);
+        if (finishedSocket && finishedSocket.readyState < WebSocket.CLOSING) {
+          finishedSocket.close(1000, 'Session complete');
+        }
+      }
+    }
+
+    function stopMicrophoneCapture() {
+      if (processor) processor.disconnect();
+      if (microphone) microphone.disconnect();
+      if (muteGain) muteGain.disconnect();
+      if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
+      processor = microphone = muteGain = mediaStream = null;
+      pcmBuffer = [];
+    }
+
+    function cleanupAudio() {
+      stopMicrophoneCapture();
+      if (audioContext && audioContext.state !== 'closed') audioContext.close();
+      audioContext = null;
+    }
+
+    async function startTranslation() {
+      const sessionId = new URLSearchParams(location.search).get('session_id');
+      if (!sessionId) { errorEl.textContent = 'Mở trang với ?session_id=...'; return; }
+      errorEl.textContent = '';
+      sourceBuffer = '';
+      translatedBuffer = '';
+      sourceEl.textContent = '';
+      translatedEl.textContent = '';
+      nextPlaybackTime = 0;
+      setRunning(true);
+      statusEl.textContent = 'Äang xin quyá»n microphoneâ€¦';
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        mediaStream = stream;
+        audioContext = new AudioContext();
+        await audioContext.resume();
+
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(`${protocol}//${location.host}/api/v1/live-sessions/${encodeURIComponent(sessionId)}`);
+        const currentSocket = socket;
+        currentSocket.onopen = () => {
+          if (socket !== currentSocket) return;
+          currentSocket.send(JSON.stringify({ type: 'start', target_language_code: targetSelect.value }));
+          microphone = audioContext.createMediaStreamSource(stream);
+          processor = audioContext.createScriptProcessor(4096, 1, 1);
+          muteGain = audioContext.createGain();
+          muteGain.gain.value = 0;
+          processor.onaudioprocess = (event) => {
+            downsampleAndSend(event.inputBuffer.getChannelData(0), audioContext.sampleRate);
+          };
+          microphone.connect(processor);
+          processor.connect(muteGain);
+          muteGain.connect(audioContext.destination);
+          statusEl.textContent = 'Äang nghe vĂ  dá»‹ch trá»±c tiáº¿pâ€¦';
+        };
+        currentSocket.onmessage = handleServerMessage;
+        currentSocket.onerror = () => {
+          if (socket !== currentSocket) return;
+          errorEl.textContent = 'KhĂ´ng káº¿t ná»‘i Ä‘Æ°á»£c WebSocket. Kiá»ƒm tra server vĂ  thá»­ láº¡i.';
+          statusEl.textContent = 'Máº¥t káº¿t ná»‘i';
+          socket = null;
+          clearTimeout(stopFallbackTimer);
+          cleanupAudio();
+          setRunning(false);
+          if (currentSocket.readyState < WebSocket.CLOSING) currentSocket.close();
+        };
+        currentSocket.onclose = () => {
+          if (socket !== currentSocket) return;
+          socket = null;
+          clearTimeout(stopFallbackTimer);
+          cleanupAudio();
+          setRunning(false);
+          if (statusEl.textContent.includes('Äang')) statusEl.textContent = 'ÄĂ£ ngáº¯t káº¿t ná»‘i';
+        };
+      } catch (error) {
+        cleanupAudio();
+        setRunning(false);
+        statusEl.textContent = 'KhĂ´ng thá»ƒ báº¯t Ä‘áº§u';
+        errorEl.textContent = error.message || String(error);
+      }
+    }
+
+    function stopTranslation() {
+      statusEl.textContent = 'Äang káº¿t thĂºc lÆ°á»£t dá»‹châ€¦';
+      flushPcmBuffer();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const stoppingSocket = socket;
+        stopMicrophoneCapture();
+        socket.send(JSON.stringify({ type: 'stop' }));
+        clearTimeout(stopFallbackTimer);
+        stopFallbackTimer = setTimeout(() => {
+          if (socket !== stoppingSocket) return;
+          statusEl.textContent = 'ÄĂ£ dá»«ng';
+          socket = null;
+          cleanupAudio();
+          setRunning(false);
+          stoppingSocket.close(1000, 'Stop timeout');
+        }, 15000);
+      } else {
+        if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+        socket = null;
+        cleanupAudio();
+        setRunning(false);
+      }
+    }
+
+    startButton.addEventListener('click', startTranslation);
+    stopButton.addEventListener('click', stopTranslation);
+  </script>
+</body>
+</html>
