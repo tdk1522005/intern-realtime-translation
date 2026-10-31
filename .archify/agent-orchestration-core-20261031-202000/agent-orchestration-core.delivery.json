@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "08f8f6b7-5f61-45e3-8ce0-6482f2e9a0df",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.candidate.json",
+  "output": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.html",
+  "specification": {
+    "sha256": "40122da4c49e7bac33dbcd1bad2789cf5db4ae2d483b0859d9bc9d5bae37429e",
+    "bytes": 6138
+  },
+  "artifact": {
+    "sha256": "977fa708e3026f621b5059cc2f8b251a94fa92b567dd9c58d51ff78d85f4daec",
+    "bytes": 846952
+  }
+}

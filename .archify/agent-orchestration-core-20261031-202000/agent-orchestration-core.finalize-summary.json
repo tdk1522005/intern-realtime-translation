@@ -1,0 +1,213 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.candidate.json",
+    "sha256": "feaa2cdc8f474329670123141001ee537993bc5c9b76339dddd07e48e4b2fe19",
+    "bytes": 6763
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.html",
+    "sha256": "86cae2f016e5541d5ab6ece3266d475163dcf404f76b301c00d8c608b4615c62",
+    "bytes": 851285
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [
+    {
+      "code": "i18n/locale-fallback",
+      "severity": "warning",
+      "message": "meta.locale \"vi\" has no bundled catalog and no usable meta.translations; the Viewer chrome and <html lang> fall back to English.",
+      "subject": {
+        "diagramType": "architecture",
+        "path": "/meta/locale"
+      },
+      "evidence": {
+        "locale": "vi",
+        "bundledLocales": [
+          "en",
+          "zh-CN",
+          "zh-TW",
+          "es",
+          "ko",
+          "ar"
+        ]
+      },
+      "supportedFixes": [
+        "Supply meta.translations for this locale.",
+        "Use a bundled locale: en, zh-CN, zh-TW, es, ko, ar."
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\agent-orchestration-core-20261031-202000\\agent-orchestration-core.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4732,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 4,
+      "routesOverSuggestedBends": 2
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "id": "api-to-gemini",
+            "from": "api",
+            "to": "gemini_live",
+            "label": "PCM audio stream",
+            "collectionIndex": 1,
+            "artifactIndex": 2
+          },
+          "right": {
+            "id": "api-to-orchestrator",
+            "from": "api",
+            "to": "orchestrator",
+            "label": "Session + target language",
+            "collectionIndex": 3,
+            "artifactIndex": 4
+          },
+          "point": [
+            616,
+            246
+          ],
+          "sharedNode": "api"
+        },
+        {
+          "left": {
+            "id": "api-to-gemini",
+            "from": "api",
+            "to": "gemini_live",
+            "label": "PCM audio stream",
+            "collectionIndex": 1,
+            "artifactIndex": 2
+          },
+          "right": {
+            "id": "orchestrator-to-workers",
+            "from": "orchestrator",
+            "to": "workers",
+            "label": "Delegate core tasks",
+            "collectionIndex": 4,
+            "artifactIndex": 5
+          },
+          "point": [
+            715,
+            246
+          ]
+        },
+        {
+          "left": {
+            "id": "gemini-to-api",
+            "from": "gemini_live",
+            "to": "api",
+            "label": "Transcript + translated audio",
+            "collectionIndex": 2,
+            "artifactIndex": 3
+          },
+          "right": {
+            "id": "orchestrator-to-workers",
+            "from": "orchestrator",
+            "to": "workers",
+            "label": "Delegate core tasks",
+            "collectionIndex": 4,
+            "artifactIndex": 5
+          },
+          "point": [
+            715,
+            321
+          ]
+        },
+        {
+          "left": {
+            "id": "orchestrator-to-workers",
+            "from": "orchestrator",
+            "to": "workers",
+            "label": "Delegate core tasks",
+            "collectionIndex": 4,
+            "artifactIndex": 5
+          },
+          "right": {
+            "id": "api-to-sqlite",
+            "from": "api",
+            "to": "sqlite",
+            "label": "Lifecycle + transcript queries",
+            "collectionIndex": 8,
+            "artifactIndex": 9
+          },
+          "point": [
+            715,
+            342
+          ]
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "id": "orchestrator-to-adapter",
+            "from": "orchestrator",
+            "to": "gemini_adapter",
+            "label": "Connect / resume",
+            "collectionIndex": 5,
+            "artifactIndex": 6
+          },
+          "bends": 3,
+          "stretch": 1.234
+        },
+        {
+          "relationship": {
+            "id": "workers-to-sqlite",
+            "from": "workers",
+            "to": "sqlite",
+            "label": "Save ordered segment/state",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "bends": 3,
+          "stretch": 1.2
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "api → gemini_live and api → orchestrator cross next to api: move node gemini_live or orchestrator so the two reach api from different sides (for example one level with it, one directly above or below it).",
+      "api → gemini_live crosses orchestrator → workers: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "gemini_live → api crosses orchestrator → workers: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "orchestrator → workers crosses api → sqlite: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "orchestrator → gemini_adapter needs 3 bends: move node orchestrator or gemini_adapter so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "workers → sqlite needs 3 bends: move node workers or sqlite so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

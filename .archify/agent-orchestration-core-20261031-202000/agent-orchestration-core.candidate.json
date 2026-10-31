@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Điều phối agent trong lõi dịch realtime",
+    "output": ".archify/agent-orchestration-core-20261031-202000/agent-orchestration-core.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/tdk1522005/intern-realtime-translation.git",
+      "provider": "github",
+      "revision": "606720262ea288d4db2f1d8a9c5c41daec7fc5b2",
+      "link_mode": "web"
+    }
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "frontend",
+      "label": "Web / App",
+      "sublabel": "Gửi PCM, nhận transcript",
+      "pos": [40, 80],
+      "size": [165, 78],
+      "sources": [
+        { "path": "backend/INTEGRATION_GUIDE.md", "line": 29, "end_line": 66, "label": "Live WebSocket" }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI core",
+      "sublabel": "WebSocket live + REST lifecycle",
+      "pos": [310, 80],
+      "size": [205, 88],
+      "sources": [
+        { "path": "backend/live_session_router.py", "line": 262, "end_line": 334, "label": "WebSocket/session" },
+        { "path": "backend/live_session_router.py", "line": 919, "end_line": 938, "label": "Ready contract" },
+        { "path": "backend/main.py", "line": 1060, "end_line": 1086, "label": "Summary export" }
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "Agent điều phối",
+      "sublabel": "LiveSessionOrchestrator",
+      "pos": [320, 280],
+      "size": [230, 88],
+      "sources": [
+        { "path": "backend/live_agents.py", "line": 519, "end_line": 543, "label": "Parent coordinator" }
+      ]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Các agent chuyên trách",
+      "sublabel": "VAD · transcript · memory · metrics · connection",
+      "pos": [650, 280],
+      "size": [255, 98],
+      "sources": [
+        { "path": "backend/live_agents.py", "line": 60, "end_line": 98, "label": "VAD/transcript/memory" },
+        { "path": "backend/live_agents.py", "line": 239, "end_line": 292, "label": "Persist an utterance" },
+        { "path": "backend/live_agents.py", "line": 396, "end_line": 515, "label": "Gemini adapter/metrics/guard" }
+      ]
+    },
+    {
+      "id": "gemini_live",
+      "type": "external",
+      "label": "Gemini Live",
+      "sublabel": "Audio stream và bản dịch",
+      "pos": [970, 80],
+      "size": [190, 88],
+      "sources": [
+        { "path": "backend/gemini_live_service.py", "line": 18, "end_line": 49, "label": "Configured Live client" }
+      ]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "SQLite memory",
+      "sublabel": "Segments, resume state, metrics",
+      "pos": [970, 280],
+      "size": [210, 88],
+      "sources": [
+        { "path": "backend/database.py", "line": 48, "end_line": 62, "label": "Ordered segments" },
+        { "path": "backend/database.py", "line": 82, "end_line": 108, "label": "Resume + connect metrics" }
+      ]
+    },
+    {
+      "id": "t5",
+      "type": "external",
+      "label": "T5 teammate",
+      "sublabel": "Tóm tắt ngoài phạm vi core",
+      "pos": [40, 280],
+      "size": [205, 88],
+      "sources": [
+        { "path": "backend/INTEGRATION_GUIDE.md", "line": 119, "end_line": 159, "label": "T5 handoff contract" }
+      ]
+    }
+  ],
+  "connections": [
+    { "id": "client-to-api", "from": "client", "to": "api", "label": "WebSocket audio" },
+    { "id": "api-to-gemini", "from": "api", "to": "gemini_live", "label": "PCM audio stream", "variant": "emphasis" },
+    { "id": "gemini-to-api", "from": "gemini_live", "to": "api", "label": "Transcript + translated audio" },
+    { "id": "api-to-orchestrator", "from": "api", "to": "orchestrator", "label": "Session + target language" },
+    { "id": "orchestrator-to-workers", "from": "orchestrator", "to": "workers", "label": "Delegate core tasks" },
+    { "id": "workers-to-sqlite", "from": "workers", "to": "sqlite", "label": "Persist" },
+    { "id": "api-to-sqlite", "from": "api", "to": "sqlite", "label": "Lifecycle + transcript queries" },
+    { "id": "api-to-t5", "from": "api", "to": "t5", "label": "Ordered bilingual summary input" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Việc mỗi agent làm",
+      "items": [
+        "VAD theo dõi khoảng im lặng; TranscriptAgent gom partial/final mà không nối lặp.",
+        "MemoryAgent cấp khóa segment bền vững, lưu thứ tự và trạng thái trong SQLite.",
+        "GeminiTranslationAgent mở Live stream; MetricsAgent đo và lưu latency.",
+        "Agent điều phối ghép các worker cho từng session; worker cục bộ không gọi thêm model."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Reconnect và chống trùng",
+      "items": [
+        "Cùng session/model/chiều dịch sẽ thử handle Gemini đã lưu; event báo resumed, fresh hoặc resume_fallback.",
+        "Khóa segment đang chờ được giữ qua reconnect; ghi lặp cùng ID và nội dung không tạo segment thứ hai.",
+        "Client chỉ gửi audio mới sau reconnect; binary frame chưa có ID để nhận diện audio replay."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Giới hạn cần nhớ khi bàn giao",
+      "items": [
+        "Transcript cũ vẫn nằm trong database; chưa thể nạp text history vào model Live Translate vốn nhận audio.",
+        "Gemini có thể từ chối handle; khi đó backend mở stream mới và báo fallback, không giả vờ đã khôi phục.",
+        "Khóa chống hai stream là theo một process; triển khai nhiều worker cần khóa dùng chung."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Đo và xuất dữ liệu",
+      "items": [
+        "Metrics giữ p50/p95 audio-to-source, audio-to-translation, Stop-to-final và provider connect theo từng chế độ.",
+        "API core chỉ xuất transcript hai ngôn ngữ có thứ tự cho T5; không chạy T5 hoặc xây giao diện nhóm."
+      ]
+    }
+  ]
+}

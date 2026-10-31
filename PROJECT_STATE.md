@@ -2,7 +2,7 @@
 
 > Tài liệu bàn giao để tiếp tục công việc ở các cuộc trò chuyện sau. Đọc file này trước khi đề xuất hoặc sửa code. Cập nhật mục **Trạng thái hiện tại** và **Việc tiếp theo** sau mỗi mốc có bằng chứng.
 >
-> Cập nhật lần cuối: 2026-10-31 (Asia/Saigon)
+> Cập nhật lần cuối: 2026-10-31 (Asia/Saigon). Nhánh phát triển core mới nhất: `codex/multi-agent-core`.
 
 ## 1. Mục tiêu đồ án
 
@@ -42,6 +42,10 @@ Yêu cầu kỹ thuật cốt lõi của phần **TDKha** là xử lý luồng A
 - Trang `/live` có checkbox **Phát bản dịch bằng giọng nói**, mặc định tắt. Transcript/bản dịch dạng chữ vẫn hiển thị; khi bật thì browser phát audio Gemini, khi tắt thì browser bỏ qua audio và dừng cả audio chunk đang phát/đã lên lịch.
 - Lưu ý ranh giới model: backend vẫn cấu hình Gemini Live Translate với `response_modalities=["AUDIO"]`; model trả audio cùng output transcription. Checkbox hiện điều khiển phát âm thanh ở browser, không yêu cầu provider chuyển sang text modality. Tài liệu Google được đối chiếu ngày 2026-10-27 cho biết Live Translate dùng output modality AUDIO: https://ai.google.dev/gemini-api/docs/live-api/live-translate
 - Phần text và live tách trong `backend/gemini_service.py` và `backend/gemini_live_service.py`; model được cấu hình riêng theo loại tác vụ. Live model đọc `GEMINI_LIVE_MODEL`, mặc định vẫn là `gemini-3.5-live-translate-preview` để giữ hành vi hiện tại.
+- Đã thêm kiến trúc agent trong `backend/live_agents.py`: `LiveSessionOrchestrator` điều phối worker VAD, transcript, memory, Gemini translation, metrics và connection guard. Các worker nội bộ xử lý trạng thái/dữ liệu xác định; chỉ `GeminiTranslationAgent` mở kết nối model, nên không thêm lần gọi model vào đường audio realtime.
+- Trạng thái nối lại được lưu trong SQLite theo `session_id + model + target_language`: gồm resumption handle của Gemini và khóa segment đang chờ. Sau reconnect backend thử resume; nếu handle bị từ chối thì xóa handle và mở stream mới, đồng thời thông báo `context_restore_status` là `resumed`, `fresh` hoặc `resume_fallback`.
+- Khóa segment pending được cấp bền vững và cập nhật cùng transaction lưu segment; UUID kế tiếp ổn định qua reconnect. Gửi lại đúng ID và nội dung không tạo hàng thứ hai; ID dùng cho nội dung khác bị từ chối. Có process-local guard để chặn hai WebSocket cùng session trong một server process.
+- Metrics có thêm `provider_connect_ms` p50/p95 tổng và phân nhóm `fresh`, `resumed`, `resume_fallback`; vẫn giữ các số audio-to-source, audio-to-translation và Stop-to-final. Hợp đồng event và giới hạn triển khai được ghi trong `backend/INTEGRATION_GUIDE.md` và `backend/AGENT_ARCHITECTURE.md`.
 - Đã thêm handoff pack trong `backend/`: `INTEGRATION_GUIDE.md` mô tả REST/WebSocket/T5 payload; `requirements.txt` khóa dependency của môi trường hiện tại; `.env.example` liệt kê biến cấu hình không chứa secret. REST CORS có allowlist qua `CORS_ORIGINS`; để trống biến này giữ same-origin như trước.
 
 ### Đã được người dùng xác nhận chạy thủ công
@@ -76,9 +80,11 @@ Yêu cầu kỹ thuật cốt lõi của phần **TDKha** là xử lý luồng A
 - Bộ audio fixture cố định hiện là audio tổng hợp để kiểm tra format/VAD; chưa có bộ WAV tiếng người có nhãn hoặc rubric chấm độ chính xác EN↔VI. Snapshot `GET /api/v1/metrics/live-latency` ngày 2026-10-31 có 8 mẫu audio-to-source (p50 2906 ms, p95 5109 ms), 8 mẫu audio-to-translation (p50 3062 ms, p95 5250 ms), và 5 mẫu Stop-to-final (p50 2563 ms, p95 3031 ms). Đây là baseline mic thật còn nhỏ; p95 hiện gần bằng giá trị lớn nhất do số mẫu ít, chưa đủ để kết luận benchmark ổn định.
 - Retry đã được xác nhận với provider thật qua Swagger ngày 2026-10-31 trên session `989d34e5-6154-4f5e-ad07-f6488d04e2ed`: segment số 4 ban đầu `failed`; `POST /retry` trả 200, giữ nguyên `segment_id` và `source_text`, chuyển thành `completed`; gọi lại transcript trả `ready=true`, 4/4 completed, 0 failed/pending, không thiếu sequence. Đây là bằng chứng retry thành công trên segment thật sự thất bại. Lượt trước đó với provider lỗi trả 502 và giữ nguyên source/status failed, nên đã có bằng chứng cho cả nhánh provider lỗi và nhánh retry thành công.
 - Tùy chọn phát audio và khôi phục transcript trong giao diện chưa được thử lại qua trình duyệt/microphone sau thay đổi gần nhất.
-- **Ngữ cảnh model khi reconnect:** trang khôi phục lại transcript đã lưu để người dùng vẫn thấy lịch sử; Gemini Live Translate hiện nhận audio, tài liệu riêng của model nói text input không hỗ trợ. Session resumption được tài liệu Live API chung mô tả, nhưng tài liệu riêng Live Translate không xác nhận khả năng tương thích. Chưa bật tính năng này cho model đã chọn để tránh làm lỗi stream đang hoạt động. Cần benchmark/chuyển sang model Live tổng quát nếu bắt buộc nạp text-history hoặc dùng session resumption.
-- Live persistence đã cấp một `segment_id` ổn định cho transcript buffer hiện tại và dùng lại ID đó nếu chốt/lưu được gọi lại. Lưu cùng ID và cùng nội dung trả segment hiện có; tái sử dụng ID cho nội dung khác bị từ chối. Hai test SQLite kiểm tra replay không tạo hàng thứ hai và xung đột nội dung. Giới hạn: ID đang nằm trong bộ nhớ của WebSocket; chưa đảm bảo nhận diện replay sau khi process khởi động lại hoặc trên kết nối mới.
+- **Gemini resumption cần xác nhận với provider thật:** đã lưu handle, tự thử resume và có fallback; offline/mock test đạt. Tài liệu Live API chung có hỗ trợ session resumption, nhưng tài liệu riêng của Gemini Live Translate không xác nhận tính tương thích. Vì Live Translate nhận audio và không hỗ trợ text input, backend không thể nạp transcript cũ dưới dạng text; nếu resume không được chấp nhận, lịch sử vẫn còn trong database nhưng model bắt đầu stream mới. Cần thử microphone/provider thật và kiểm tra `context_restore_status` trước khi khẳng định ngữ cảnh Gemini được khôi phục.
+- Chống trùng segment qua kết nối mới đã được bổ sung bằng `pending_segment_id` bền vững và khóa idempotent trong SQLite; test mô phỏng reconnect/process restart kiểm tra sequence và replay. **Audio binary replay chưa thể khử trùng:** frame chưa có ID/thứ tự từ client, nên client phải chỉ gửi frame mới sau reconnect; việc phát lại frame cũ có thể bị hiểu là lời nói mới.
+- Connection guard hiện chỉ áp dụng trong một Python process. Nếu deploy nhiều Uvicorn worker hoặc nhiều máy, cần đổi guard thành lock/lease dùng chung trước khi bật cấu hình đó.
 - Dữ liệu đầu vào cho T5 đã có theo từng session và toàn presentation; phần chạy model T5, UI/app của Thiện/Linh và kiểm thử đa thiết bị của Ngọc nằm ngoài phần TDKha.
+- `backend/AGENT_ARCHITECTURE.md` và `backend/INTEGRATION_GUIDE.md` là tài liệu handoff hiện tại. Sơ đồ mới của agent core ở `.archify/agent-orchestration-core-20261031-202000/agent-orchestration-core.html`; sơ đồ mô tả kiến trúc, không phải bằng chứng Gemini resume thật.
 - Backend FastAPI còn cảnh báo deprecation `@app.on_event("startup")`; không làm hỏng test/runtime nhưng có thể đổi sang lifespan ở đợt dọn kỹ thuật kế tiếp.
 - Checklist workbook vẫn là snapshot thủ công 48 hạng mục ghi ngày 2026-10-24; số trạng thái trong đó không tự đồng bộ với code. Không dùng số này để khẳng định tiến độ sau các cập nhật ngày 2026-10-28.
 
@@ -104,7 +110,7 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 
 - REST `/api/v1/translate` là **dịch văn bản**, không chứng minh được dịch tiếng nói realtime.
 - Trang `/live` và WebSocket là prototype live audio gắn với `session_id`; segment live lưu vào SQLite và xuất được qua transcript/summary-input REST.
-- `session_id` là định danh một phiên lưu trữ; `segment_id` là định danh bền vững của một câu/utterance đã chốt; `sequence_number` giữ thứ tự câu trong session. Live backend giữ một segment ID từ lúc bắt đầu buffer đến lúc lưu; nếu thao tác ghi được lặp lại trong cùng vòng đời buffer thì SQLite trả lại hàng cũ thay vì tăng sequence. Idempotency qua process restart/reconnect vẫn chưa được triển khai.
+- `session_id` là định danh một phiên lưu trữ; `segment_id` là định danh bền vững của một câu/utterance đã chốt; `sequence_number` giữ thứ tự câu trong session. Live backend giữ pending segment ID trong SQLite; ghi lại cùng ID/nội dung trả hàng cũ thay vì tăng sequence, kể cả sau reconnect. Đây là idempotency cho segment đã chốt, không phải nhận diện lại audio binary bị client gửi trùng.
 - Partial là nội dung tạm thời để hiển thị sớm; chỉ final mới trở thành segment chuẩn trong transcript, trừ khi thiết kế sau này yêu cầu lưu snapshot riêng.
 - `ready=true` trên transcript chỉ nói các segment đã lưu đều hoàn tất và sequence liên tục; không chứng minh rằng microphone đã được thu đầy đủ.
 - Model fallback cho text không tự động là fallback dùng được cho Live API. Hai luồng khác protocol, capabilities, và có thể cần tạo lại provider session.
@@ -129,6 +135,7 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 - Chốt bộ audio thử nghiệm và tiêu chí đo. Tối thiểu gồm giọng Anh, giọng Việt, câu dài, tên riêng/thuật ngữ, ngắt hơi giữa câu, khoảng lặng dài, đổi ngôn ngữ sau khi dừng, mạng/provider lỗi.
 - Benchmark model live chuyên dụng và model Live ổn định trên cùng fixtures trước khi quyết định model chính/dự phòng.
 - Chốt API event contract: start, ready, partial, final, error, stopped/session_complete và metadata của audio frame.
+- Trạng thái: hợp đồng hiện tại đã được ghi trong `backend/INTEGRATION_GUIDE.md`; lựa chọn model ổn định và khả năng session-resumption của Live Translate vẫn cần provider thật để chốt.
 
 ### Giai đoạn B — Nối live stream với session/memory
 
@@ -136,6 +143,7 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 - Thiết kế event mapper/adaptor để provider-specific event không rò ra contract frontend.
 - Tạo segment/sequence cho utterance final; chỉ persist final; giữ ID idempotent trong vòng đời buffer; đảm bảo transaction, uniqueness và thứ tự.
 - Liên kết transcript endpoint, finish và summary-input với dữ liệu được sinh từ live stream.
+- Trạng thái: đã có và đã tự động kiểm thử offline; reconnect dùng state SQLite để giữ sequence/segment ID.
 
 ### Giai đoạn C — Lifecycle, lỗi và hiệu năng
 
@@ -143,12 +151,14 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 - Cố định ngưỡng frame, queue, timeout, idle timeout, giới hạn session và chính sách buffer/backpressure.
 - Thử provider 503/429/timeout, socket đóng sớm, browser reload và retry; xác định rõ trường hợp resume, reconnect hay đánh dấu failed.
 - Đo latency p50/p95 và các lỗi completeness/duplication trên cùng fixtures; dùng số liệu để sửa ngưỡng.
+- Trạng thái: logic retry, Stop drain, VAD, transcript reconciliation, reconnect/fallback và metrics đã có regression tests; cần chạy thử provider thật cho resume/fallback và tăng cỡ mẫu latency.
 
 ### Giai đoạn D — Bàn giao cho tích hợp nhóm
 
 - Viết API contract và ví dụ payload/error ổn định cho web/app.
 - Cung cấp transcript tiếng Anh/Việt có thứ tự và summary input đã kiểm tra cho Thắng.
 - Lưu bằng chứng demo, benchmark, retry/recovery và giới hạn đã biết để đưa vào báo cáo.
+- Trạng thái: hướng dẫn và contract đã có; web/app/T5 chỉ cần tiêu thụ endpoint/event đã ghi. Chất lượng dịch và benchmark thật vẫn là bằng chứng bổ sung, không chặn tích hợp kỹ thuật ban đầu.
 
 ## 7. Bằng chứng cần có để trình bày với hội đồng
 
@@ -170,13 +180,14 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 
 1. Đọc `PROJECT_STATE.md` trước; đọc checklist realtime và source code liên quan nếu cần xác nhận chi tiết.
 2. Xem tin nhắn mới nhất của người dùng là chỉ đạo tiếp tục/điều chỉnh lộ trình.
-3. Chưa sửa code hoặc tạo thêm file cho đến khi người dùng yêu cầu. Khi được yêu cầu code, cung cấp trọn file/code và hướng dẫn chạy theo từng bước; không bắt người dùng tự tìm và thay những đoạn rời rạc.
+3. Người dùng đã yêu cầu một nhánh checkpoint an toàn, một nhánh phát triển riêng, agent orchestration, reconnect/idempotency/metrics và tài liệu handoff; các thay đổi đó đã được thực hiện trên `codex/multi-agent-core`.
 4. Người dùng đã cho phép tự chạy và kiểm tra để sửa lỗi hiệu quả; có thể chạy test offline khi cần, nhưng phải phân biệt rõ test offline với kiểm thử Gemini/microphone thật.
 5. Sau mỗi mốc, cập nhật file này bằng trạng thái và bằng chứng mới; không ghi “đã xong” chỉ dựa trên code tồn tại hoặc ví dụ Swagger chưa chạy đúng trường hợp.
-6. Bằng chứng offline mới nhất: `backend/.venv/Scripts/python.exe -m unittest discover -s tests -v` đạt 51/51 ngày 2026-10-31; lượt chạy mới nhất mất 5.829 giây. Test dùng dữ liệu synthetic hoặc Gemini mock; không gọi Google Live thật. Sau thay đổi handoff, `py_compile` cho các module chính đạt; `git diff --check` không báo lỗi nội dung (chỉ cảnh báo chuẩn hóa LF/CRLF của `PROJECT_STATE.md`). GET `/health` trên server đang chạy vẫn trả 200 sau hot reload.
+6. Bằng chứng offline mới nhất ngày 2026-10-31: `backend/.venv/Scripts/python.exe -m unittest discover -s tests -v` đạt **60/60**, 2.244 giây. `compileall` toàn backend và `git diff --check` đạt. Test dùng fixture/synthetic hoặc Gemini mock; không gọi Google Live thật. Trước nhánh này, người dùng đã xác nhận `/health` trả 200; lượt hiện tại không kiểm tra server đang chạy.
 7. Đã xác nhận bằng mic thật lỗi mất chữ cuối được sửa và đã xác nhận finish session → finish presentation → export summary-input. Lượt `73a8ee52-f222-41fd-9acc-d71fb8b167b7` xác nhận 3 segment EN→VI rồi 3 segment VI→EN, 6/6 completed. Lượt kế `5ed6790e-e33c-44f5-97a1-13c7d7dd6b04` xác nhận VI→EN, kết thúc session/presentation và summary-input đúng. Lượt cuối dùng presentation mới; chưa có bằng chứng summary gom nhiều session trong cùng presentation. Retry với Gemini thật đã được xác nhận thành công trên segment `failed` thật ở session `989d34e5-6154-4f5e-ad07-f6488d04e2ed`. Các ưu tiên còn lại: quality set có nhãn, benchmark p50/p95 và kiểm chứng thêm các luồng reconnect/multi-session.
 8. Ngày 2026-10-31, retry thật trên segment `failed` trả 200; cùng segment chuyển sang `completed`, giữ nguyên ID/source; transcript sau đó trả `ready=true`, 4/4 completed, không thiếu sequence. Lượt retry thật trước đó trên DB tạm nhận lỗi provider 502 và giữ nguyên source/status failed. Hai đường xử lý retry thành công/thất bại đều đã có bằng chứng.
-9. Ngữ cảnh model khi reconnect vẫn là quyết định mở: không nạp text vào Live Translate vì tài liệu model nói text input không được hỗ trợ; cần kiểm tra session resumption trên đúng model hoặc benchmark model Live tổng quát trước khi tuyên bố đã khôi phục ngữ cảnh Gemini.
+9. Reconnect/resumption đã được triển khai nhưng chỉ có mock coverage. Phải dùng mic/provider thật để xác nhận model có phát và chấp nhận handle; event `session_ready.context_restore_status` là nguồn kiểm tra. Nếu là `resume_fallback`/`fresh`, lịch sử ứng dụng còn trong SQLite nhưng context model chưa khôi phục.
+10. Checkpoint đã đẩy lên `origin/checkpoint/core-before-agent-architecture` tại commit `179a22d`; nhánh phát triển `codex/multi-agent-core` có commit code `6067202`. Sau khi cập nhật trạng thái/sơ đồ, cần commit và push lại nhánh phát triển; không thay đổi nhánh checkpoint.
 
 ## 10. Archify đã cài và sơ đồ kiến trúc
 
@@ -188,5 +199,7 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 - Ngày 2026-10-31, sau khi thêm idempotency cho live segment, cả ba sơ đồ đã được làm mới theo source snapshot hiện tại và qua Archify validate, deliver, provenance check, browser-check. Đường phản hồi Gemini Live trong sơ đồ kiến trúc có ba khúc nhưng đã được xem ở 1440×900 light/dark: không che node/label và đọc được; sơ đồ sequence dài theo chiều dọc nên xem bằng cách cuộn. Ba HTML được tạo lại trong cùng thư mục artifact.
 - Các nguồn trong sơ đồ được xác thực theo snapshot Git cục bộ tách biệt tại `C:\Users\tdkha\.codex\visualizations\2026\10\23\01a16a1a-a4c7-7b93-98f5-88e390d6a426\archify-source-snapshot-20261031-182805`, revision `604d631c0b179e575ed3053bc491a8c282219c32`. Snapshot chỉ chứa các file source cần trích dẫn, dùng `link_mode: local-only`, không phải commit đã push lên GitHub và không làm thay đổi nhánh chính. Khi source được sửa, cần cập nhật snapshot và finalize sơ đồ.
 - Nội dung sơ đồ bằng tiếng Việt; nút điều khiển của Archify Viewer hiện còn tiếng Anh. Cài đặt tạo thêm `skills-lock.json` và thư mục `.agents/`; artifact đầu ra ở `.archify/`. Không có sửa backend trong bước cài Archify này.
-- Ngày 2026-10-31 đã thêm idempotency theo `segment_id` ổn định trong vòng đời live buffer; replay cùng dữ liệu không tạo duplicate, xung đột ID bị từ chối, 51/51 test đạt. Idempotency sau reconnect/process restart vẫn chưa có. Retry Gemini thật đã được kiểm chứng thành công và khi provider lỗi vẫn giữ source. Handoff pack nay gồm contract REST/WebSocket/T5, setup, dependency và CORS allowlist có thể cấu hình. Việc tiếp theo của API core là xây quality set có nhãn, benchmark p50/p95 trên đủ mẫu, đánh giá VAD/partial reconciliation trên nhiều lượt và xác nhận multi-session summary-input. Archify minh họa kiến trúc nhưng không thay các bằng chứng kiểm thử runtime.
+- Ngày 2026-10-31, nhánh `codex/multi-agent-core` thêm `LiveSessionOrchestrator` và specialist agents; resume handle và pending segment ID được lưu bền vững; có fallback stream mới, chặn hai kết nối trong một process, metrics provider connect theo mode. Suite mới nhất đạt 60/60 mock/offline tests. Sơ đồ agent orchestration được tạo tại `.archify/agent-orchestration-core-20261031-202000/agent-orchestration-core.html`, pin source commit `6067202`; Archify validate/deliver/check/browser-check và visual-check 1440×900/2048×1320 light/dark đều đạt. Viewer chrome còn tiếng Anh, nội dung sơ đồ tiếng Việt.
+- Các sơ đồ cũ trong `architecture-realtime-translation-20261031-182805/` là snapshot lịch sử và chưa mô tả agent orchestration/reconnect mới; dùng sơ đồ agent ở trên cho kiến trúc hiện tại. Archify minh họa kiến trúc nhưng không thay các bằng chứng kiểm thử runtime.
+- Việc còn lại trong phần core: thử resume thật trên model đang cấu hình; chạy VAD/transcript với nhiều câu/giọng và ngắt hơi 1–2 giây; thu thêm số đo p50/p95; ghi nhận giới hạn multi-worker/audio-frame replay. Đánh giá chất lượng dịch có nhãn có ích cho toàn nhóm nhưng không chặn hợp đồng API bàn giao.
 
