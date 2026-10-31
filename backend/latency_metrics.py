@@ -17,6 +17,8 @@ METRIC_DESCRIPTIONS = {
     "stop_to_final_persisted_ms": "Stop command received to final segment persisted",
 }
 
+PROVIDER_CONNECTION_MODES = ("fresh", "resumed", "resume_fallback")
+
 
 @dataclass
 class LiveLatencyTracker:
@@ -115,6 +117,38 @@ def record_samples(session_id: str, samples: dict[str, float]) -> int:
     return len(accepted)
 
 
+def record_provider_connection_sample(
+    session_id: str,
+    latency_ms: float,
+    connection_mode: str,
+) -> bool:
+    """Persist provider setup latency and whether session context resumed."""
+    value = float(latency_ms)
+    if (
+        connection_mode not in PROVIDER_CONNECTION_MODES
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        return False
+
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO live_provider_connection_samples (
+                sample_id, session_id, connection_mode, latency_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                session_id,
+                connection_mode,
+                value,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    return True
+
+
 def read_latency_report(*, max_samples: int = 10_000) -> dict:
     """Aggregate the most recent persisted samples for each latency metric."""
     with database.get_connection() as connection:
@@ -127,6 +161,15 @@ def read_latency_report(*, max_samples: int = 10_000) -> dict:
             """,
             (max_samples,),
         ).fetchall()
+        provider_rows = connection.execute(
+            """
+            SELECT connection_mode, latency_ms
+            FROM live_provider_connection_samples
+            ORDER BY created_at DESC, sample_id DESC
+            LIMIT ?
+            """,
+            (max_samples,),
+        ).fetchall()
 
     grouped: dict[str, list[float]] = {
         name: [] for name in METRIC_DESCRIPTIONS
@@ -134,14 +177,31 @@ def read_latency_report(*, max_samples: int = 10_000) -> dict:
     for row in rows:
         grouped[row["metric_name"]].append(float(row["latency_ms"]))
 
+    provider_by_mode = {mode: [] for mode in PROVIDER_CONNECTION_MODES}
+    for row in provider_rows:
+        provider_by_mode[row["connection_mode"]].append(
+            float(row["latency_ms"])
+        )
+    provider_all = [value for values in provider_by_mode.values() for value in values]
+
+    metrics = {
+        name: {
+            "description": METRIC_DESCRIPTIONS[name],
+            **summarize_samples(values),
+        }
+        for name, values in grouped.items()
+    }
+    metrics["provider_connect_ms"] = {
+        "description": "provider connection setup time, including resumption fallback",
+        **summarize_samples(provider_all),
+    }
+
     return {
         "method": "nearest_rank",
         "window_limit": max_samples,
-        "metrics": {
-            name: {
-                "description": METRIC_DESCRIPTIONS[name],
-                **summarize_samples(values),
-            }
-            for name, values in grouped.items()
+        "metrics": metrics,
+        "provider_connection_modes": {
+            mode: summarize_samples(values)
+            for mode, values in provider_by_mode.items()
         },
     }

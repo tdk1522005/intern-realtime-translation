@@ -86,7 +86,7 @@ function stopLiveTranslation() {
 
 | Event | Cách client xử lý |
 |---|---|
-| `session_ready` | Backend sẵn sàng; có `session_id`, `source_language`, `target_language`, `audio_format` và thông số VAD. |
+| `session_ready` | Backend sẵn sàng; có `session_id`, `source_language`, `target_language`, `audio_format`, thông số VAD, `context_restore_status`, `context_restored`, số segment lịch sử, sequence cuối và thời gian mở provider. |
 | `input_partial` | Transcript nguồn đang cập nhật. Thay nội dung preview bằng `text`; không nối snapshot vào cuối. |
 | `output_partial` | Bản dịch đang cập nhật. Cũng thay preview bằng `text`. |
 | `segment_final` | Segment đã lưu; có `segment_id`, `sequence_number`, `source_text`, `source_language`, `en`, `vn`, `status`, `created_at`. Đây là bản ghi cuối. |
@@ -94,9 +94,12 @@ function stopLiveTranslation() {
 | `speech_pause_detected`, `vad_diagnostic` | Thông tin chẩn đoán VAD; có thể bỏ qua trong giao diện sản phẩm. |
 | `stop_draining` | Backend đang xả frame cuối và đợi transcript/bản dịch; chưa báo hoàn tất. |
 | `stream_stopped` | Luồng đã dừng; có số segment lưu được và số liệu drain. Session trong database vẫn `active` để có thể nối lại hoặc kết thúc sau. |
+| `provider_go_away` | Gemini báo provider connection sắp đóng. Dừng gửi audio lên socket hiện tại; có thể mở lại WebSocket với cùng `session_id` và ngôn ngữ đích để backend thử resume. |
 | `error` | Có `message` mô tả lỗi. Nếu socket đóng, tải transcript REST lại để đồng bộ trạng thái. |
 
 Partial là preview có thể thay đổi; chỉ `segment_final` là dữ liệu chuẩn. Nếu gặp lại cùng `segment_id`, cập nhật bản ghi đó thay vì thêm hàng mới. Sắp xếp theo `sequence_number`, không dựa vào thứ tự event đến UI.
+
+Khi reconnect cùng session và cùng chiều dịch, backend thử dùng Gemini resumption handle mới nhất. `session_ready.context_restored` cho biết provider context có thực sự được khôi phục hay không; các bản ghi transcript vẫn được lưu dù provider phải mở stream mới. Client chỉ gửi audio mới sau reconnect, không gửi lại các frame đã gửi trước đó. Binary audio hiện chưa mang frame ID nên backend không thể phân biệt audio replay với lời nói được lặp lại có chủ ý. Backend giữ `segment_id` đang chờ ghi qua reconnect và việc lưu segment/advance ID là idempotent trong SQLite. Nếu session đang có một WebSocket khác, kết nối thứ hai nhận event `error` và close code 1013.
 
 ## 4. REST endpoints cốt lõi
 
@@ -115,7 +118,7 @@ Partial là preview có thể thay đổi; chỉ `segment_final` là dữ liệu
 | Kết thúc presentation | `POST /api/v1/presentations/{presentation_id}/finish` |
 | Summary input theo session | `GET /api/v1/sessions/{session_id}/summary-input` |
 | Summary input toàn presentation | `GET /api/v1/presentations/{presentation_id}/summary-input` |
-| Metrics live | `GET /api/v1/metrics/live-latency` |
+| Metrics live và reconnect | `GET /api/v1/metrics/live-latency` |
 
 Tạo segment văn bản dùng body:
 
@@ -181,6 +184,8 @@ T5 có thể dùng `transcript_en`/`transcript_vn` làm nội dung tổng hợp 
 - `CORS_ORIGINS` là danh sách origin web, phân tách bằng dấu phẩy. Thay bằng origin chính xác của web khi tích hợp/triển khai; không dùng `*` khi có transcript.
 - CORS middleware áp dụng REST HTTP. WebSocket có protocol riêng và không nằm trong OpenAPI.
 - `GEMINI_API_KEY` chỉ nằm ở backend. Web/app gọi backend, không gọi Gemini trực tiếp bằng key dùng chung.
+- Gemini resumption handles nằm trong SQLite ở backend, được phân biệt theo session/model/ngôn ngữ đích và tự bỏ khi quá hạn; không chuyển handle cho client.
+- Metrics endpoint có thêm p50/p95 `provider_connect_ms` và phân nhóm theo `fresh`, `resumed`, `resume_fallback`.
 - `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL` dành cho dịch văn bản; `GEMINI_LIVE_MODEL` dành cho stream audio. Model live mặc định giữ nguyên model hiện tại nếu biến này không được đặt.
 - Các biến `LIVE_*` trong `.env.example` tinh chỉnh VAD/drain; nếu bỏ trống, code dùng giá trị mặc định hiện có.
 

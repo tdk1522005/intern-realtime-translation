@@ -13,10 +13,8 @@ import database
 import gemini_live_service
 import gemini_service
 import latency_metrics
-from audio_vad import PauseDetector
+from live_agents import LiveSessionOrchestrator, next_segment_id
 from transcript_assembler import (
-    TranscriptAssembler,
-    VADBoundaryTracker,
     count_sentence_endings,
     ends_with_sentence_punctuation,
 )
@@ -163,130 +161,22 @@ def _save_live_segment(
     translation_repaired: bool = False,
     segment_id: str | None = None,
 ) -> dict:
-    """
-    Persist one completed provider turn.
-
-    If the source or translation is unfinished, or an unrepaired live
-    translation contains fewer sentence endings than the source, preserve the
-    text and mark the segment failed so the retry endpoint can be used.
-    """
-    source_text = source_text.strip()
-    translated_text = translated_text.strip()
-
-    if not source_text:
-        raise ValueError("Cannot save a live segment without source text.")
-
-    source_language = "en" if target_language == "vi" else "vi"
-
-    if source_language == "en":
-        en_text = source_text
-        vn_text = translated_text or None
-    else:
-        vn_text = source_text
-        en_text = translated_text or None
-
-    source_is_complete = ends_with_sentence_punctuation(source_text)
-    translation_is_complete = ends_with_sentence_punctuation(translated_text)
-    sentence_counts_are_acceptable = (
-        translation_repaired
-        or count_sentence_endings(source_text)
-        <= count_sentence_endings(translated_text)
+    """Compatibility helper that delegates persistence to the memory agent."""
+    orchestrator = LiveSessionOrchestrator(LIVE_MODEL)
+    context = orchestrator.prepare(
+        session_id,
+        target_language,
+        preferred_pending_segment_id=segment_id,
     )
-    segment_status = (
-        "completed"
-        if (
-            translated_text
-            and source_is_complete
-            and translation_is_complete
-            and sentence_counts_are_acceptable
-        )
-        else "failed"
+    if context is None:
+        raise ValueError("Session not found or is not active.")
+    return orchestrator.memory.save_live_segment(
+        context,
+        source_text,
+        translated_text,
+        translation_repaired=translation_repaired,
+        segment_id=segment_id or context.pending_segment_id,
     )
-    # The caller keeps this key with the active transcript buffer and reuses
-    # it if finalization has to be retried after a persistence interruption.
-    segment_id = str(segment_id or uuid4())
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    with database.get_connection() as connection:
-        # Reserve the SQLite write lock while assigning the sequence number.
-        connection.execute("BEGIN IMMEDIATE")
-
-        session = connection.execute(
-            "SELECT status FROM sessions WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-
-        if session is None:
-            raise ValueError("Session not found.")
-
-        if session["status"] != "active":
-            raise ValueError("Session is not active.")
-
-        existing = connection.execute(
-            "SELECT * FROM segments WHERE segment_id = ?",
-            (segment_id,),
-        ).fetchone()
-        if existing is not None:
-            same_segment = (
-                existing["session_id"] == session_id
-                and existing["source_text"] == source_text
-                and existing["source_language"] == source_language
-                and existing["en"] == en_text
-                and existing["vn"] == vn_text
-                and existing["status"] == segment_status
-            )
-            if not same_segment:
-                raise ValueError(
-                    "The live segment idempotency key is already used "
-                    "for different segment data."
-                )
-            return dict(existing)
-
-        row = connection.execute(
-            """
-            SELECT COALESCE(MAX(sequence_number), 0) AS max_number
-            FROM segments
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
-
-        sequence_number = (row["max_number"] or 0) + 1
-
-        connection.execute(
-            """
-            INSERT INTO segments (
-                segment_id,
-                session_id,
-                sequence_number,
-                source_text,
-                source_language,
-                en,
-                vn,
-                status,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                segment_id,
-                session_id,
-                sequence_number,
-                source_text,
-                source_language,
-                en_text,
-                vn_text,
-                segment_status,
-                created_at,
-            ),
-        )
-
-        saved = connection.execute(
-            "SELECT * FROM segments WHERE segment_id = ?",
-            (segment_id,),
-        ).fetchone()
-
-    return dict(saved)
 
 
 async def _forward_audio_queue(audio_queue, provider_session) -> None:
@@ -330,19 +220,8 @@ async def _forward_audio_queue(audio_queue, provider_session) -> None:
 
 def _build_live_config(target_language: str):
     """Build Live Translate config with client-controlled speech boundaries."""
-    return types.LiveConnectConfig(
-        response_modalities=["AUDIO"],
-        input_audio_transcription=types.AudioTranscriptionConfig(),
-        output_audio_transcription=types.AudioTranscriptionConfig(),
-        realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
-                disabled=True
-            )
-        ),
-        translation_config=types.TranslationConfig(
-            target_language_code=target_language,
-            echo_target_language=True,
-        ),
+    return LiveSessionOrchestrator(LIVE_MODEL).translation.build_config(
+        target_language
     )
 
 
@@ -384,17 +263,15 @@ def _final_audio_queue_items(
 async def live_session_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
 
+    orchestrator = LiveSessionOrchestrator(LIVE_MODEL)
     send_lock = asyncio.Lock()
     stop_requested = asyncio.Event()
     audio_queue: asyncio.Queue[bytes | object | None] = asyncio.Queue(
         maxsize=AUDIO_QUEUE_SIZE
     )
-    pause_detector = PauseDetector(
-        rms_threshold=LIVE_VAD_RMS_THRESHOLD,
-        min_speech_duration_ms=LIVE_VAD_MIN_SPEECH_MS,
-        silence_duration_ms=LIVE_VAD_SILENCE_MS,
-    )
+    pause_detector = None
     last_vad_diagnostic_at = 0.0
+    connection_lock_acquired = False
 
     async def send_event(event: dict) -> None:
         try:
@@ -427,9 +304,26 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
-        active = await asyncio.to_thread(_is_session_active, session_id)
+        connection_lock_acquired = await orchestrator.connections.try_acquire(
+            session_id
+        )
+        if not connection_lock_acquired:
+            await send_event({
+                "type": "error",
+                "message": (
+                    "This session already has a live connection. Close or wait "
+                    "for it to stop before reconnecting."
+                ),
+            })
+            await websocket.close(code=1013)
+            return
 
-        if not active:
+        session_context = await asyncio.to_thread(
+            orchestrator.prepare,
+            session_id,
+            target_language,
+        )
+        if session_context is None:
             await send_event({
                 "type": "error",
                 "message": "Session not found or is not active.",
@@ -437,11 +331,16 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
-        source_language = "en" if target_language == "vi" else "vi"
-
-        transcript = TranscriptAssembler()
-        boundary_tracker = VADBoundaryTracker(settle_ms=LIVE_SEGMENT_SETTLE_MS)
-        pending_segment_id = str(uuid4())
+        source_language = session_context.source_language
+        pause_detector = orchestrator.audio.create_detector(
+            rms_threshold=LIVE_VAD_RMS_THRESHOLD,
+            min_speech_duration_ms=LIVE_VAD_MIN_SPEECH_MS,
+            silence_duration_ms=LIVE_VAD_SILENCE_MS,
+        )
+        transcript, boundary_tracker = orchestrator.transcript.create_buffers(
+            settle_ms=LIVE_SEGMENT_SETTLE_MS
+        )
+        pending_segment_id = session_context.pending_segment_id
         transcript_lock = asyncio.Lock()
         boundary_wakeup = asyncio.Event()
         turn_boundary_seen = False
@@ -458,6 +357,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
         output_timing_events = 0
         provider_generation_completions = 0
         provider_turn_completions = 0
+        provider_resumption_updates = 0
         transcript_activity_changed = asyncio.Event()
         last_transcript_event_at: float | None = None
         last_provider_terminal_at: float | None = None
@@ -467,7 +367,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
         stop_drain_reason = "not_stopped"
         stop_drain_elapsed_ms = 0.0
         audio_sender_failed = False
-        latency_tracker = latency_metrics.LiveLatencyTracker()
+        latency_tracker = orchestrator.metrics.create_tracker()
 
         def note_transcript_activity() -> None:
             nonlocal last_transcript_event_at
@@ -558,9 +458,8 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                     translation_repairs += 1
 
                 saved = await asyncio.to_thread(
-                    _save_live_segment,
-                    session_id,
-                    target_language,
+                    orchestrator.memory.save_live_segment,
+                    session_context,
                     source_text,
                     translated_text,
                     translation_repaired=translation_recovered,
@@ -571,7 +470,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 boundary_tracker.reset()
                 turn_boundary_seen = False
                 segments_saved += 1
-                pending_segment_id = str(uuid4())
+                pending_segment_id = next_segment_id(
+                    session_id,
+                    pending_segment_id,
+                )
 
             await send_event({
                 "type": "segment_final",
@@ -832,9 +734,36 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             nonlocal output_timing_events
             nonlocal provider_generation_completions
             nonlocal provider_turn_completions
+            nonlocal provider_resumption_updates
 
             async with asyncio.timeout(15 * 60):
                 async for response in provider_session.receive():
+                    resumption_update = getattr(
+                        response,
+                        "session_resumption_update",
+                        None,
+                    )
+                    if resumption_update is not None:
+                        await asyncio.to_thread(
+                            orchestrator.memory.save_resumption_update,
+                            session_context,
+                            resumption_update,
+                        )
+                        provider_resumption_updates += 1
+
+                    go_away = getattr(response, "go_away", None)
+                    if go_away is not None:
+                        await send_event({
+                            "type": "provider_go_away",
+                            "session_id": session_id,
+                            "time_left": go_away.time_left,
+                            "message": (
+                                "Gemini Live is about to close this provider "
+                                "connection. Reconnect with the same session "
+                                "to try restoring its context."
+                            ),
+                        })
+
                     content = response.server_content
 
                     if content is None:
@@ -965,8 +894,6 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                     if content.turn_complete and stop_requested.is_set():
                         return
 
-        config = _build_live_config(target_language)
-
         receiver_task = None
         sender_task = None
         provider_task = None
@@ -977,16 +904,30 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
         receiver_task = asyncio.create_task(receive_client_audio())
 
         try:
-            async with LIVE_CLIENT.aio.live.connect(
-                model=LIVE_MODEL,
-                config=config,
-            ) as provider_session:
+            provider_connect_started_at = asyncio.get_running_loop().time()
+            async with orchestrator.translation.connect(
+                LIVE_CLIENT,
+                session_context,
+                orchestrator.memory,
+            ) as (provider_session, context_restore_status):
+                provider_connect_ms = round(
+                    (asyncio.get_running_loop().time() - provider_connect_started_at)
+                    * 1000,
+                    3,
+                )
                 await send_event({
                     "type": "session_ready",
                     "session_id": session_id,
                     "source_language": source_language,
                     "target_language": target_language,
                     "audio_format": "pcm_s16le/16000/mono",
+                    "context_restored": context_restore_status == "resumed",
+                    "context_restore_status": context_restore_status,
+                    "history_segments_available": (
+                        session_context.persisted_segment_count
+                    ),
+                    "last_sequence_number": session_context.last_sequence_number,
+                    "provider_connect_ms": provider_connect_ms,
                     "vad": {
                         "rms_threshold": LIVE_VAD_RMS_THRESHOLD,
                         "min_speech_ms": LIVE_VAD_MIN_SPEECH_MS,
@@ -995,6 +936,18 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         "provider_activity_mode": "manual",
                     },
                 })
+                try:
+                    await asyncio.to_thread(
+                        orchestrator.metrics.persist_provider_connection,
+                        session_id,
+                        provider_connect_ms,
+                        context_restore_status,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not save provider connect latency for session %s.",
+                        session_id,
+                    )
 
                 sender_task = asyncio.create_task(
                     send_audio_to_gemini(provider_session)
@@ -1230,6 +1183,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             "output_timing_events": output_timing_events,
             "provider_generation_completions": provider_generation_completions,
             "provider_turn_completions": provider_turn_completions,
+            "provider_resumption_updates": provider_resumption_updates,
+            "context_restore_status": context_restore_status,
+            "context_restored": context_restore_status == "resumed",
+            "provider_connect_ms": provider_connect_ms,
             "session_remains_active": True,
         })
 
@@ -1264,3 +1221,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1011)
         except RuntimeError:
             pass
+
+    finally:
+        if connection_lock_acquired:
+            orchestrator.connections.release(session_id)

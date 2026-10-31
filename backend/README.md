@@ -18,6 +18,7 @@ Mở Swagger tại `http://127.0.0.1:8000/docs`. Cách cài lại dependencies v
 |---|---|
 | `main.py` | Điểm khởi động FastAPI; REST API quản lý presentation/session/segment, transcript, retry và dữ liệu bàn giao T5. |
 | `live_session_router.py` | Nhận audio qua WebSocket, điều phối Gemini Live, ghép transcript, chốt segment và xử lý Stop. |
+| `live_agents.py` | Agent điều phối phiên và các worker audio/VAD, Gemini, transcript, memory, metrics; giữ token reconnect và khóa phiên. |
 | `gemini_live_service.py` | Kết nối model Gemini Live cho audio. |
 | `gemini_service.py` | Dịch/hiệu chỉnh văn bản bằng Gemini. |
 | `audio_vad.py` | Phát hiện tiếng nói và khoảng lặng từ âm thanh. |
@@ -30,6 +31,7 @@ Mở Swagger tại `http://127.0.0.1:8000/docs`. Cách cài lại dependencies v
 ## File phục vụ tích hợp và kiểm tra
 
 - `INTEGRATION_GUIDE.md`: contract REST/WebSocket, thứ tự gọi API và payload bàn giao cho T5.
+- `AGENT_ARCHITECTURE.md`: nhiệm vụ từng agent/worker, luồng reconnect, chống trùng và ranh giới tích hợp.
 - `requirements.txt`: dependencies Python của backend.
 - `.env.example`: mẫu cấu hình không chứa API key thật.
 - `tests/`: test backend và fixture. Chạy bằng `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`.

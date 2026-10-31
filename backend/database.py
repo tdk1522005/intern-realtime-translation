@@ -78,6 +78,34 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_live_latency_metric_created
                 ON live_latency_samples(metric_name, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS live_provider_context (
+                session_id TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                target_language TEXT NOT NULL CHECK (
+                    target_language IN ('en', 'vi')
+                ),
+                resumption_handle TEXT,
+                resumption_updated_at TEXT,
+                pending_segment_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, model_name, target_language),
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS live_provider_connection_samples (
+                sample_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                connection_mode TEXT NOT NULL CHECK (
+                    connection_mode IN ('fresh', 'resumed', 'resume_fallback')
+                ),
+                latency_ms REAL NOT NULL CHECK (latency_ms >= 0),
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_provider_connect_created
+                ON live_provider_connection_samples(created_at DESC);
             """
         )
 
