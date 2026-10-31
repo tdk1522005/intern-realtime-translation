@@ -130,6 +130,7 @@ class SessionStatusResponse(BaseModel):
     ended_at: str | None
     total_segments: int
     completed_segments: int
+    fragment_segments: int
     failed_segments: int
     pending_segments: int
 
@@ -140,6 +141,7 @@ class TranscriptResponse(BaseModel):
     ready: bool
     total_segments: int
     completed_segments: int
+    fragment_segments: int
     failed_segments: int
     pending_segments: int
     missing_sequence_numbers: list[int]
@@ -151,8 +153,9 @@ class SummarySegmentInput(BaseModel):
     sequence_number: int
     source_text: str
     source_language: Literal["en", "vi"]
-    en: str
-    vn: str
+    en: str | None
+    vn: str | None
+    status: Literal["completed", "fragment"] = "completed"
 
 
 class SummaryInputResponse(BaseModel):
@@ -851,10 +854,12 @@ def _load_session_status(connection, session_id: str) -> SessionStatusResponse:
             COUNT(g.segment_id) AS total_segments,
             SUM(CASE WHEN g.status = 'completed' THEN 1 ELSE 0 END)
                 AS completed_segments,
+            SUM(CASE WHEN g.status = 'fragment' THEN 1 ELSE 0 END)
+                AS fragment_segments,
             SUM(CASE WHEN g.status = 'failed' THEN 1 ELSE 0 END)
                 AS failed_segments,
             SUM(CASE WHEN g.segment_id IS NOT NULL
-                      AND g.status NOT IN ('completed', 'failed')
+                      AND g.status NOT IN ('completed', 'fragment', 'failed')
                      THEN 1 ELSE 0 END) AS pending_segments
         FROM sessions AS s
         LEFT JOIN segments AS g ON g.session_id = s.session_id
@@ -876,6 +881,7 @@ def _load_session_status(connection, session_id: str) -> SessionStatusResponse:
         ended_at=row["ended_at"],
         total_segments=row["total_segments"] or 0,
         completed_segments=row["completed_segments"] or 0,
+        fragment_segments=row["fragment_segments"] or 0,
         failed_segments=row["failed_segments"] or 0,
         pending_segments=row["pending_segments"] or 0,
     )
@@ -934,6 +940,17 @@ def get_session_status(session_id: str):
         ) from exc
 
 
+@app.get("/api/v1/sessions/{session_id}/live-diagnostics")
+def get_session_live_diagnostics(session_id: str):
+    """Read event timing from the latest stopped live connection."""
+    with database.get_connection() as connection:
+        _load_session_status(connection, session_id)
+    trace = latency_metrics.read_latest_stream_trace(session_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="No completed live trace yet.")
+    return trace
+
+
 @app.get(
     "/api/v1/sessions/{session_id}/transcript",
     response_model=TranscriptResponse,
@@ -970,6 +987,7 @@ def get_session_transcript(session_id: str):
             ready=ready,
             total_segments=status.total_segments,
             completed_segments=status.completed_segments,
+            fragment_segments=status.fragment_segments,
             failed_segments=status.failed_segments,
             pending_segments=status.pending_segments,
             missing_sequence_numbers=missing,
@@ -983,6 +1001,36 @@ def get_session_transcript(session_id: str):
             status_code=500,
             detail="Could not retrieve session transcript.",
         ) from exc
+
+
+def _summary_row_is_usable(row) -> bool:
+    if row["status"] == "completed":
+        return bool(row["en"] and row["vn"])
+    if row["status"] == "fragment":
+        source_field = "en" if row["source_language"] == "en" else "vn"
+        return bool(row["source_text"] and row[source_field])
+    return False
+
+
+def _summary_segment_from_row(row) -> SummarySegmentInput:
+    return SummarySegmentInput(
+        segment_id=row["segment_id"],
+        sequence_number=row["sequence_number"],
+        source_text=row["source_text"],
+        source_language=row["source_language"],
+        en=row["en"],
+        vn=row["vn"],
+        status=row["status"],
+    )
+
+
+def _summary_transcript(segments: list[SummarySegmentInput], language: str) -> str:
+    """Exclude provisional translations while retaining fragment source speech."""
+    return " ".join(
+        text for segment in segments
+        if segment.status == "completed" or segment.source_language == language
+        if (text := getattr(segment, "en" if language == "en" else "vn"))
+    )
 
 
 @app.get(
@@ -1016,26 +1064,13 @@ def get_session_summary_input(session_id: str):
                 detail="Cannot export summary input for an empty session.",
             )
 
-        if any(
-            row["status"] != "completed" or not row["en"] or not row["vn"]
-            for row in rows
-        ):
+        if any(not _summary_row_is_usable(row) for row in rows):
             raise HTTPException(
                 status_code=409,
-                detail="Every segment must be completed before export.",
+                detail="Every segment must have a final source transcript before export.",
             )
 
-        segments = [
-            SummarySegmentInput(
-                segment_id=row["segment_id"],
-                sequence_number=row["sequence_number"],
-                source_text=row["source_text"],
-                source_language=row["source_language"],
-                en=row["en"],
-                vn=row["vn"],
-            )
-            for row in rows
-        ]
+        segments = [_summary_segment_from_row(row) for row in rows]
 
         return SummaryInputResponse(
             session_id=status.session_id,
@@ -1043,8 +1078,8 @@ def get_session_summary_input(session_id: str):
             session_number=status.session_number,
             session_status=status.status,
             segment_count=len(segments),
-            transcript_en=" ".join(segment.en for segment in segments),
-            transcript_vn=" ".join(segment.vn for segment in segments),
+            transcript_en=_summary_transcript(segments, "en"),
+            transcript_vn=_summary_transcript(segments, "vi"),
             segments=segments,
         )
     except HTTPException:
@@ -1062,7 +1097,7 @@ def get_session_summary_input(session_id: str):
     response_model=PresentationSummaryInputResponse,
 )
 def get_presentation_summary_input(presentation_id: str):
-    """Export all completed bilingual transcripts in presentation order for T5."""
+    """Export completed translations and preserved source fragments for T5."""
     try:
         with database.get_connection() as connection:
             status = _load_presentation_status(connection, presentation_id)
@@ -1112,13 +1147,10 @@ def get_presentation_summary_input(presentation_id: str):
                 detail="Cannot export summary input for an empty presentation.",
             )
 
-        if any(
-            row["status"] != "completed" or not row["en"] or not row["vn"]
-            for row in segment_rows
-        ):
+        if any(not _summary_row_is_usable(row) for row in segment_rows):
             raise HTTPException(
                 status_code=409,
-                detail="Every segment in the presentation must be completed before export.",
+                detail="Every segment must have a final source transcript before export.",
             )
 
         segments_by_session: dict[str, list[SummarySegmentInput]] = {
@@ -1126,14 +1158,7 @@ def get_presentation_summary_input(presentation_id: str):
         }
         for row in segment_rows:
             segments_by_session[row["session_id"]].append(
-                SummarySegmentInput(
-                    segment_id=row["segment_id"],
-                    sequence_number=row["sequence_number"],
-                    source_text=row["source_text"],
-                    source_language=row["source_language"],
-                    en=row["en"],
-                    vn=row["vn"],
-                )
+                _summary_segment_from_row(row)
             )
 
         sessions = [
@@ -1141,11 +1166,11 @@ def get_presentation_summary_input(presentation_id: str):
                 session_id=session["session_id"],
                 session_number=session["session_number"],
                 segment_count=len(segments_by_session[session["session_id"]]),
-                transcript_en=" ".join(
-                    segment.en for segment in segments_by_session[session["session_id"]]
+                transcript_en=_summary_transcript(
+                    segments_by_session[session["session_id"]], "en"
                 ),
-                transcript_vn=" ".join(
-                    segment.vn for segment in segments_by_session[session["session_id"]]
+                transcript_vn=_summary_transcript(
+                    segments_by_session[session["session_id"]], "vi"
                 ),
                 segments=segments_by_session[session["session_id"]],
             )
@@ -1218,8 +1243,8 @@ def finish_session(session_id: str):
                     status_code=409,
                     detail={
                         "message": (
-                            "Cannot finish the session until every segment is "
-                            "translated and sequence numbers are continuous."
+                            "Cannot finish the session until provider failures "
+                            "are resolved and sequence numbers are continuous."
                         ),
                         "pending_segments": status.pending_segments,
                         "failed_segments": status.failed_segments,

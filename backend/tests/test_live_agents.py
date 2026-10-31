@@ -76,6 +76,40 @@ class LiveAgentReconnectTests(unittest.TestCase):
         self.assertEqual(reconnected_context.persisted_segment_count, 1)
         self.assertEqual(reconnected_context.last_sequence_number, 1)
 
+    def test_continuation_revises_last_fragment_without_adding_a_segment(self):
+        context = self.orchestrator.prepare("session-agent-test", "en")
+        fragment = self.orchestrator.memory.save_live_segment(
+            context, "Xin", "Thank you.",
+            source_fragment=True,
+            segment_id=context.pending_segment_id,
+        )
+        self.assertEqual(fragment["status"], "fragment")
+        self.assertEqual(fragment["en"], "Thank you.")
+
+        reconnected = self.orchestrator.prepare("session-agent-test", "en")
+        pending_id = reconnected.pending_segment_id
+        loaded = self.orchestrator.memory.load_last_fragment(reconnected)
+        self.assertEqual(loaded["segment_id"], fragment["segment_id"])
+        revised = self.orchestrator.memory.revise_last_fragment(
+            reconnected, loaded, "Xin chào bạn.", "Hello.",
+            status="completed",
+        )
+        self.assertEqual(revised["segment_id"], fragment["segment_id"])
+        self.assertEqual(revised["sequence_number"], 1)
+        self.assertEqual(revised["source_text"], "Xin chào bạn.")
+        self.assertEqual(revised["en"], "Hello.")
+        self.assertEqual(revised["status"], "completed")
+        self.assertIsNone(self.orchestrator.memory.load_last_fragment(reconnected))
+
+        after = self.orchestrator.prepare("session-agent-test", "en")
+        self.assertEqual(after.pending_segment_id, pending_id)
+        self.assertEqual(after.persisted_segment_count, 1)
+        with self.assertRaisesRegex(ValueError, "fragment changed"):
+            self.orchestrator.memory.revise_last_fragment(
+                reconnected, loaded, "Xin chào lần nữa.", "Hello again.",
+                status="completed",
+            )
+
     def test_same_finalization_replayed_after_reconnect_is_stored_once(self):
         first_context = self.orchestrator.prepare("session-agent-test", "vi")
         original_id = first_context.pending_segment_id

@@ -79,6 +79,17 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_live_latency_metric_created
                 ON live_latency_samples(metric_name, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS live_stream_traces (
+                trace_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                events_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_live_stream_traces_session_created
+                ON live_stream_traces(session_id, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS live_provider_context (
                 session_id TEXT NOT NULL,
                 model_name TEXT NOT NULL,

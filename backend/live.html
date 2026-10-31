@@ -12,6 +12,7 @@
     .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     select, button { font: inherit; padding: 10px 14px; border-radius: 8px; }
     .speech-option { display: inline-flex; align-items: center; gap: 7px; }
+    [hidden] { display: none !important; }
     .speech-option input { width: 18px; height: 18px; }
     button { border: 0; cursor: pointer; color: white; background: #1769d2; }
     button:disabled { cursor: not-allowed; opacity: .5; }
@@ -28,6 +29,7 @@
 <body>
   <h1>Dịch giọng nói trực tiếp</h1>
   <p class="hint">Cho phép trình duyệt dùng microphone. Bản dịch sẽ luôn hiển thị bằng chữ. Chỉ bật phát giọng nói nếu bạn muốn nghe bản dịch.</p>
+  <p class="hint" id="sessionIdHint"></p>
 
   <div class="controls">
     <label for="target">Dịch sang</label>
@@ -41,6 +43,10 @@
     </label>
     <button id="start">Bắt đầu</button>
     <button id="stop" disabled>Dừng</button>
+    <label class="speech-option" id="continueOption" hidden>
+      <input id="continueFragment" type="checkbox" checked>
+      Nối tiếp đoạn nói dở
+    </label>
     <span id="status">Chưa kết nối</span>
   </div>
   <div id="vadStatus" class="hint" aria-live="polite">Chẩn đoán khoảng nghỉ: chưa bắt đầu.</div>
@@ -60,11 +66,22 @@
     const stopButton = document.getElementById('stop');
     const targetSelect = document.getElementById('target');
     const speechToggle = document.getElementById('speechToggle');
+    const sessionIdHint = document.getElementById('sessionIdHint');
+    const pageParams = new URLSearchParams(location.search);
+    const pageSessionId = pageParams.get('session_id');
+    const requestedActivityMode = pageParams.get('provider_activity_mode');
+    const providerActivityMode = ['automatic', 'hybrid'].includes(requestedActivityMode)
+      ? requestedActivityMode : 'manual';
+    sessionIdHint.textContent = pageSessionId
+      ? `session_id của lượt thử: ${pageSessionId}; Gemini VAD: ${providerActivityMode}`
+      : 'Chưa có session_id trong địa chỉ trang.';
     const statusEl = document.getElementById('status');
     const sourceEl = document.getElementById('source');
     const translatedEl = document.getElementById('translated');
     const errorEl = document.getElementById('error');
     const vadStatusEl = document.getElementById('vadStatus');
+    const continueOption = document.getElementById('continueOption');
+    const continueFragment = document.getElementById('continueFragment');
 
     let socket;
     let audioContext;
@@ -76,6 +93,7 @@
     let translatedBuffer = '';
     let sourcePreview = '';
     let translatedPreview = '';
+    let savedSegments = [];
     let pcmBuffer = [];
     let nextPlaybackTime = 0;
     let stopFallbackTimer;
@@ -122,17 +140,24 @@
       translatedEl.textContent = mergeDisplayedTranscript(translatedBuffer, translatedPreview);
     }
 
+    function rebuildSavedText() {
+      sourceBuffer = savedSegments.map((segment) => segment.source_text || '')
+        .filter(Boolean).join('\n');
+      translatedBuffer = savedSegments.map((segment) => {
+        const value = segment.source_language === 'en' ? segment.vn : segment.en;
+        return segment.status === 'fragment' && value ? `[Tạm] ${value}` : value;
+      }).filter(Boolean).join('\n');
+      renderTranscript();
+    }
+
     function commitSegment(message) {
-      if (message.source_text) {
-        sourceBuffer += `${sourceBuffer ? '\n' : ''}${message.source_text}`;
-      }
-      const translatedText = message.source_language === 'en' ? message.vn : message.en;
-      if (translatedText) {
-        translatedBuffer += `${translatedBuffer ? '\n' : ''}${translatedText}`;
-      }
+      const index = savedSegments.findIndex((item) => item.segment_id === message.segment_id);
+      if (index >= 0) savedSegments[index] = message;
+      else savedSegments.push(message);
+      savedSegments.sort((a, b) => a.sequence_number - b.sequence_number);
       sourcePreview = '';
       translatedPreview = '';
-      renderTranscript();
+      rebuildSavedText();
     }
 
     function sendPcmChunk(samples) {
@@ -220,9 +245,13 @@
           'đang chờ transcript ổn định để lưu segment.';
       }
       if (message.type === 'segment_final') {
-        vadStatusEl.textContent = message.translation_recovered
-          ? `Đã lưu segment #${message.sequence_number}; đã hoàn chỉnh bản dịch sau khi dừng.`
-          : `Đã lưu segment #${message.sequence_number} (${message.status}).`;
+        vadStatusEl.textContent = message.status === 'fragment'
+          ? `Đã giữ nguyên đoạn nói dở #${message.sequence_number}; chưa chốt bản dịch.`
+          : message.source_confirmed_without_punctuation
+          ? `Đã lưu segment #${message.sequence_number}; xác nhận câu nói thiếu dấu câu cuối sau khi dừng.`
+          : message.translation_recovered
+            ? `Đã lưu segment #${message.sequence_number}; đã hoàn chỉnh bản dịch sau khi dừng.`
+            : `Đã lưu segment #${message.sequence_number} (${message.status}).`;
       }
       if (message.type === 'stop_draining') {
         statusEl.textContent = 'Đang chờ xử lý phần cuối…';
@@ -249,12 +278,16 @@
             `bản dịch báo xong ${message.output_finished_events} lần; ` +
             `có mốc thời gian ${message.input_timing_events}/${message.output_timing_events} lần; ` +
             `nhận ${message.input_transcription_events} mảnh tiếng gốc, ` +
+            `${message.input_interim_events ?? 0} bản tạm tiếng gốc, ` +
+            `giữ đuôi bản tạm ${message.source_preview_tail_preservations ?? 0} lần; ` +
             `${message.output_transcription_events} mảnh bản dịch; ` +
             `thay snapshot lũy tiến ${message.source_snapshot_replacements} lần, ` +
             `bỏ snapshot cũ ${message.stale_source_snapshots_ignored} lần; ` +
             `chờ cuối ${message.stop_drain_elapsed_ms} ms (${message.stop_drain_reason}); ` +
             `hoàn chỉnh lại ${message.translation_repairs} bản dịch; ` +
-            `đã lưu ${message.segments_saved} segment.`;
+            `xác nhận ${message.stop_source_confirmations ?? 0} câu thiếu dấu câu cuối; ` +
+            `đã lưu ${message.segments_saved} segment, ` +
+            `trong đó ${message.fragments_saved ?? 0} đoạn nói dở.`;
         }
         const finishedSocket = socket;
         socket = null;
@@ -282,7 +315,7 @@
     }
 
     async function startTranslation() {
-      const sessionId = new URLSearchParams(location.search).get('session_id');
+      const sessionId = pageSessionId;
       if (!sessionId) { errorEl.textContent = 'Mở trang với ?session_id=...'; return; }
       errorEl.textContent = '';
       vadStatusEl.textContent = 'Đang đo âm thanh microphone…';
@@ -300,16 +333,12 @@
           throw new Error('Không tải được transcript đã lưu cho phiên này.');
         }
         const transcript = await transcriptResponse.json();
-        const savedSegments = transcript.segments || [];
-        sourceBuffer = savedSegments
-          .map((segment) => segment.source_text || '')
-          .filter(Boolean)
-          .join('\n');
-        translatedBuffer = savedSegments
-          .map((segment) => segment.source_language === 'en' ? segment.vn : segment.en)
-          .filter(Boolean)
-          .join('\n');
-        renderTranscript();
+        savedSegments = transcript.segments || [];
+        rebuildSavedText();
+        const lastSegment = savedSegments.at(-1);
+        const sourceLanguage = targetSelect.value === 'en' ? 'vi' : 'en';
+        continueOption.hidden = !lastSegment || lastSegment.status !== 'fragment' ||
+          lastSegment.source_language !== sourceLanguage;
         vadStatusEl.textContent =
           `Đã khôi phục ${savedSegments.length} segment đã lưu; ` +
           'đang xin quyền microphone…';
@@ -326,7 +355,13 @@
         const currentSocket = socket;
         currentSocket.onopen = () => {
           if (socket !== currentSocket) return;
-          currentSocket.send(JSON.stringify({ type: 'start', target_language_code: targetSelect.value }));
+          currentSocket.send(JSON.stringify({
+            type: 'start',
+            target_language_code: targetSelect.value,
+            continue_fragment: !continueOption.hidden && continueFragment.checked,
+            speech_output_enabled: speechToggle.checked,
+            provider_activity_mode: providerActivityMode
+          }));
           microphone = audioContext.createMediaStreamSource(stream);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
           muteGain = audioContext.createGain();
@@ -393,6 +428,11 @@
     startButton.addEventListener('click', startTranslation);
     stopButton.addEventListener('click', stopTranslation);
     speechToggle.addEventListener('change', async () => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'set_speech_output', enabled: speechToggle.checked
+        }));
+      }
       if (speechToggle.checked && audioContext && audioContext.state === 'suspended') {
         try { await audioContext.resume(); } catch (_) { /* Browser may block playback until a user gesture. */ }
       }

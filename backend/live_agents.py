@@ -26,6 +26,9 @@ from transcript_assembler import (
     VADBoundaryTracker,
     count_sentence_endings,
     ends_with_sentence_punctuation,
+    is_source_fragment_at_stop,
+    is_unfinished_standalone_phrase,
+    plausible_unpunctuated_stop_source,
 )
 
 
@@ -86,7 +89,7 @@ class TranscriptAgent:
 
 
 class MemoryAgent:
-    """Load durable session state and persist completed bilingual segments."""
+    """Load durable session state and persist live transcript segments."""
 
     def __init__(self, database_module=database) -> None:
         self.database = database_module
@@ -243,6 +246,9 @@ class MemoryAgent:
         translated_text: str,
         *,
         translation_repaired: bool = False,
+        translation_unverified: bool = False,
+        stop_source_confirmed: bool = False,
+        source_fragment: bool = False,
         segment_id: str | None = None,
     ) -> dict:
         source_text = source_text.strip()
@@ -252,24 +258,60 @@ class MemoryAgent:
 
         source_language = context.source_language
         target_language = context.target_language
-        en_text = source_text if source_language == "en" else translated_text or None
-        vn_text = source_text if source_language == "vi" else translated_text or None
-        source_is_complete = ends_with_sentence_punctuation(source_text)
-        translation_is_complete = ends_with_sentence_punctuation(translated_text)
+        if source_fragment and not is_source_fragment_at_stop(
+            source_text, source_language
+        ):
+            raise ValueError("The source is not an unfinished fragment.")
+        source_is_complete = (
+            (
+                ends_with_sentence_punctuation(source_text)
+                and not is_unfinished_standalone_phrase(
+                    source_text, source_language
+                )
+            )
+            or (
+                stop_source_confirmed
+                and plausible_unpunctuated_stop_source(
+                    source_text, source_language
+                )
+            )
+        )
+        translation_is_complete = (
+            ends_with_sentence_punctuation(translated_text)
+            or (
+                stop_source_confirmed
+                and plausible_unpunctuated_stop_source(
+                    translated_text, target_language
+                )
+            )
+        )
         sentence_counts_are_acceptable = (
             translation_repaired
+            or stop_source_confirmed
             or count_sentence_endings(source_text)
             <= count_sentence_endings(translated_text)
         )
-        segment_status = (
-            "completed"
-            if (
-                translated_text
-                and source_is_complete
-                and translation_is_complete
-                and sentence_counts_are_acceptable
+        if source_fragment:
+            segment_status = "fragment"
+        else:
+            segment_status = (
+                "completed"
+                if (
+                    translated_text
+                    and not translation_unverified
+                    and source_is_complete
+                    and translation_is_complete
+                    and sentence_counts_are_acceptable
+                )
+                else "failed"
             )
-            else "failed"
+        # Keep a streamed translation as a provisional preview on fragments.
+        # Consumers must inspect status before treating it as a final translation.
+        en_text = source_text if source_language == "en" else (
+            translated_text or None
+        )
+        vn_text = source_text if source_language == "vi" else (
+            translated_text or None
         )
         segment_id = str(segment_id or context.pending_segment_id)
         next_pending_id = next_segment_id(context.session_id, segment_id)
@@ -359,6 +401,77 @@ class MemoryAgent:
             ).fetchone()
             return dict(saved)
 
+    def load_last_fragment(self, context: LiveSessionContext) -> dict | None:
+        """Resume only the final fragment in this session and direction."""
+        with self.database.get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM segments WHERE session_id = ?
+                ORDER BY sequence_number DESC LIMIT 1
+                """,
+                (context.session_id,),
+            ).fetchone()
+        if not row or row["status"] != "fragment":
+            return None
+        if row["source_language"] != context.source_language:
+            return None
+        return dict(row)
+
+    def revise_last_fragment(
+        self,
+        context: LiveSessionContext,
+        previous: dict,
+        source_text: str,
+        translated_text: str,
+        *,
+        status: str,
+    ) -> dict:
+        """Atomically replace a fragment with its continued phrase or preview."""
+        if status not in {"fragment", "completed", "failed"}:
+            raise ValueError("Invalid continuation status.")
+        source_text = source_text.strip()
+        translated_text = translated_text.strip()
+        if not source_text or (status == "completed" and not translated_text):
+            raise ValueError("A completed continuation needs both texts.")
+
+        en_text = source_text if context.source_language == "en" else translated_text or None
+        vn_text = source_text if context.source_language == "vi" else translated_text or None
+        with self.database.get_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                "SELECT status FROM sessions WHERE session_id = ?",
+                (context.session_id,),
+            ).fetchone()
+            if not session or session["status"] != "active":
+                raise ValueError("Session is not active.")
+            latest = connection.execute(
+                """
+                SELECT * FROM segments WHERE session_id = ?
+                ORDER BY sequence_number DESC LIMIT 1
+                """,
+                (context.session_id,),
+            ).fetchone()
+            if (
+                not latest
+                or latest["segment_id"] != previous["segment_id"]
+                or latest["status"] != "fragment"
+                or latest["source_text"] != previous["source_text"]
+                or latest["source_language"] != context.source_language
+            ):
+                raise ValueError("The fragment changed before continuation was saved.")
+            connection.execute(
+                """
+                UPDATE segments SET source_text = ?, en = ?, vn = ?, status = ?
+                WHERE segment_id = ?
+                """,
+                (source_text, en_text, vn_text, status, latest["segment_id"]),
+            )
+            saved = connection.execute(
+                "SELECT * FROM segments WHERE segment_id = ?",
+                (latest["segment_id"],),
+            ).fetchone()
+            return dict(saved)
+
     def _advance_pending_id(
         self,
         connection,
@@ -400,25 +513,29 @@ class GeminiTranslationAgent:
     def build_config(
         target_language: str,
         resumption_handle: str | None = None,
+        provider_activity_mode: str = "manual",
     ):
-        config = types.LiveConnectConfig(
+        if provider_activity_mode not in {"manual", "automatic", "hybrid"}:
+            raise ValueError("provider_activity_mode must be manual, automatic or hybrid.")
+        config_kwargs = dict(
             response_modalities=["AUDIO"],
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            realtime_input_config=types.RealtimeInputConfig(
-                automatic_activity_detection=types.AutomaticActivityDetection(
-                    disabled=True
-                )
-            ),
             translation_config=types.TranslationConfig(
                 target_language_code=target_language,
                 echo_target_language=True,
             ),
         )
+        if provider_activity_mode == "manual":
+            config_kwargs["realtime_input_config"] = types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=True
+                )
+            )
+        config = types.LiveConnectConfig(**config_kwargs)
         if resumption_handle:
             config.session_resumption = types.SessionResumptionConfig(
                 handle=resumption_handle,
-                transparent=False,
             )
         return config
 
@@ -428,6 +545,8 @@ class GeminiTranslationAgent:
         client,
         context: LiveSessionContext,
         memory_agent: MemoryAgent,
+        *,
+        provider_activity_mode: str = "manual",
     ) -> AsyncIterator[tuple[Any, str]]:
         async with AsyncExitStack() as stack:
             resume_attempted = bool(context.resumption_handle)
@@ -438,6 +557,7 @@ class GeminiTranslationAgent:
                         config=self.build_config(
                             context.target_language,
                             context.resumption_handle,
+                            provider_activity_mode,
                         ),
                     )
                 )
@@ -457,7 +577,10 @@ class GeminiTranslationAgent:
                 provider_session = await stack.enter_async_context(
                     client.aio.live.connect(
                         model=context.model_name,
-                        config=self.build_config(context.target_language),
+                        config=self.build_config(
+                            context.target_language,
+                            provider_activity_mode=provider_activity_mode,
+                        ),
                     )
                 )
                 connection_mode = "resume_fallback"

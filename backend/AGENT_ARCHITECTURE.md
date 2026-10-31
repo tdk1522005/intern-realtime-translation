@@ -28,6 +28,14 @@ inputs/outputs in `live_agents.py`. Provider-specific setup is isolated in
 `GeminiTranslationAgent`; browser/app event names remain in the existing
 WebSocket contract.
 
+`provider_activity_mode` is an optional start field. `manual` remains the
+default; `automatic` and `hybrid` are experimental provider VAD protocols.
+The local VAD still emits pause events used by transcript assembly in all
+three modes. Hybrid sends `audio_stream_end` on local pauses to prompt the
+provider to flush cached audio. A single real microphone run saved the full
+sentence before Stop, but its first partial was still delayed; this is not a
+latency guarantee. See `INTEGRATION_GUIDE.md` for the client contract.
+
 ## Start and reconnect flow
 
 1. The client opens `WS /api/v1/live-sessions/{session_id}` and sends the

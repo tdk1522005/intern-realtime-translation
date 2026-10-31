@@ -57,6 +57,69 @@ def ends_with_sentence_punctuation(text: str) -> bool:
     return bool(candidate and candidate[-1] in _SENTENCE_ENDINGS)
 
 
+_OPEN_ENGLISH_TAILS = frozenset({
+    "a", "an", "the", "and", "or", "but", "because", "if", "when",
+    "at", "by", "for", "from", "in", "into", "of", "on", "to",
+    "with", "without", "please", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would",
+    "can", "could", "should", "may", "might", "my", "your", "our",
+    "their", "this", "that", "these", "those",
+})
+_OPEN_VIETNAMESE_TAILS = frozenset({
+    "và", "hoặc", "nhưng", "vì", "nếu", "khi", "là", "ở", "tại",
+    "với", "của", "cho", "vào", "từ", "đến", "để", "một", "những",
+    "các", "đã", "sẽ", "đang", "lúc", "bởi", "theo",
+    "xin",
+})
+
+
+def plausible_unpunctuated_stop_source(text: str, source_language: str) -> bool:
+    """Conservative check for a complete spoken phrase lacking final punctuation.
+
+    This is only a candidate for confirmation after a clean Stop and a
+    whole-source translation. It cannot prove semantic completeness.
+    """
+    candidate = text.strip()
+    if not candidate or candidate[-1] in ",;:-–—…":
+        return False
+    if ends_with_sentence_punctuation(candidate):
+        return False
+    words = _transcript_tokens(candidate)
+    if not words:
+        return False
+    tails = _OPEN_ENGLISH_TAILS if source_language == "en" else _OPEN_VIETNAMESE_TAILS
+    return words[-1] not in tails
+
+
+def is_unfinished_standalone_phrase(text: str, language: str) -> bool:
+    """A lone request prefix is incomplete even if ASR adds a period."""
+    words = _transcript_tokens(text)
+    return words == (["xin"] if language == "vi" else ["please"])
+
+
+def is_source_fragment_at_stop(text: str, language: str) -> bool:
+    """Identify source speech to preserve without declaring a full sentence.
+
+    Only call this for a clean explicit Stop. A provider/transport failure is
+    a different state even if its last transcript happens to look unfinished.
+    """
+    candidate = text.strip()
+    # Without a reliable final ASR marker, missing punctuation cannot prove
+    # that the last words have arrived. Keep the phrase continuable even when
+    # it looks plausible as a standalone sentence.
+    return bool(candidate and (
+        is_unfinished_standalone_phrase(candidate, language)
+        or not ends_with_sentence_punctuation(candidate)
+    ))
+
+
+def join_spoken_continuation(previous: str, following: str) -> str:
+    """Join real speech across Stop without deduplicating repeated words."""
+    prefix = re.sub(r"[.!?…。！？]+$", "", previous.strip()).rstrip()
+    suffix = following.strip()
+    return " ".join(part for part in (prefix, suffix) if part)
+
+
 def count_sentence_endings(text: str) -> int:
     """Count sentence-ending punctuation groups, ignoring decimal dots.
 
@@ -84,27 +147,44 @@ class TranscriptAssembler:
         self.source_preview = ""
         self.source_snapshot_replacements = 0
         self.stale_source_snapshots_ignored = 0
+        self.source_preview_tail_preservations = 0
 
     def set_source_preview(self, text: str) -> str:
         """Replace the provisional input snapshot; never append revisions."""
         self.source_preview = text
         return self.source_preview
 
-    def add_source_fragment(self, text: str) -> str:
-        """Append a text fragment or replace a cumulative transcript snapshot."""
+    def add_source_fragment(self, text: str, *, finished: bool = False) -> str:
+        """Append canonical text while retaining a newer interim tail if needed."""
         if _is_cumulative_prefix(self.source_text, text):
             self.source_text = text
-            self.source_preview = ""
             self.source_snapshot_replacements += 1
-            return self.source_text
-        if _is_cumulative_prefix(text, self.source_text):
+        elif _is_cumulative_prefix(text, self.source_text):
             # An older cumulative update arrived after a longer snapshot.
             self.stale_source_snapshots_ignored += 1
+            if finished:
+                self.source_preview = ""
             return self.source_for_display()
+        else:
+            self.source_text += text
 
-        self.source_text += text
-        self.source_preview = ""
-        return self.source_text
+        # A shorter canonical event can precede the last one or two words of
+        # a cumulative interim hypothesis. Keep that visible until a newer
+        # canonical event catches up. An explicit finished marker supersedes it.
+        if not finished and self.has_unconfirmed_source_tail():
+            self.source_preview_tail_preservations += 1
+        else:
+            self.source_preview = ""
+        return self.source_for_display()
+
+    def has_unconfirmed_source_tail(self) -> bool:
+        """Whether the interim source extends the canonical source by tokens."""
+        return bool(
+            self.source_preview
+            and _is_cumulative_prefix(self.source_text, self.source_preview)
+            and len(_transcript_tokens(self.source_preview))
+            > len(_transcript_tokens(self.source_text))
+        )
 
     def add_translation_fragment(self, text: str) -> str:
         """Append a streamed output fragment without dropping repeated words."""

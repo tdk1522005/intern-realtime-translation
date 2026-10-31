@@ -1,5 +1,7 @@
 # Backend core — bắt đầu từ đây
 
+Nếu chuẩn bị tích hợp theo nhóm, đọc [trang bàn giao core](../HANDOFF_CORE.md) trước.
+
 Bạn không cần mở hết file trong thư mục. Khi chạy server, FastAPI dùng `main.py` làm điểm khởi động; các file Python còn lại là những phần chức năng được `main.py` và router gọi.
 
 ## Chạy server

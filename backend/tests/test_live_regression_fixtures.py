@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
 import tempfile
 import unittest
 import wave
+from contextlib import asynccontextmanager
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 from uuid import UUID
+
+from fastapi.testclient import TestClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -17,6 +21,7 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(BACKEND_DIR))
 
 import database  # noqa: E402
+from live_agents import GeminiTranslationAgent  # noqa: E402
 from audio_vad import PauseDetector  # noqa: E402
 from latency_metrics import (  # noqa: E402
     LiveLatencyTracker,
@@ -31,6 +36,10 @@ from transcript_assembler import (  # noqa: E402
     VADBoundaryTracker,
     count_sentence_endings,
     ends_with_sentence_punctuation,
+    is_source_fragment_at_stop,
+    is_unfinished_standalone_phrase,
+    join_spoken_continuation,
+    plausible_unpunctuated_stop_source,
     merge_transcript_snapshot,
 )
 
@@ -177,6 +186,64 @@ class TranscriptAssemblerTests(unittest.TestCase):
             3,
         )
 
+    def test_stop_source_without_punctuation_requires_a_plausible_tail(self):
+        self.assertTrue(plausible_unpunctuated_stop_source(
+            "Good morning everyone", "en"
+        ))
+        self.assertTrue(plausible_unpunctuated_stop_source(
+            "Chào buổi sáng mọi người", "vi"
+        ))
+        self.assertTrue(plausible_unpunctuated_stop_source(
+            "Xin chào bạn", "vi"
+        ))
+        for text, language in (
+            ("The meeting starts at", "en"),
+            ("The book is on the", "en"),
+            ("Good morning,", "en"),
+            ("Cuộc họp bắt đầu lúc", "vi"),
+            ("Chúng ta sẽ gặp nhau ở", "vi"),
+            ("Xin", "vi"),
+            ("Please", "en"),
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(plausible_unpunctuated_stop_source(
+                    text, language
+                ))
+
+    def test_standalone_request_prefix_is_incomplete_even_with_punctuation(self):
+        self.assertTrue(is_unfinished_standalone_phrase("Xin.", "vi"))
+        self.assertTrue(is_unfinished_standalone_phrase("Please.", "en"))
+        self.assertFalse(is_unfinished_standalone_phrase("Xin chào bạn.", "vi"))
+        self.assertFalse(is_unfinished_standalone_phrase("Vâng.", "vi"))
+
+    def test_clean_stop_recognizes_spoken_fragments_without_dropping_them(self):
+        for text, language in (
+            ("Xin", "vi"),
+            ("Xin.", "vi"),
+            ("Please", "en"),
+            ("The book is on the", "en"),
+            ("Good morning,", "en"),
+            ("Good morning everyone", "en"),
+            ("Cảm ơn bạn vì đã đến tham dự", "vi"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_source_fragment_at_stop(text, language))
+        for text, language in (
+            ("Xin chào bạn.", "vi"),
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(is_source_fragment_at_stop(text, language))
+
+    def test_continuation_joins_real_words_without_deduplicating_repetitions(self):
+        self.assertEqual(
+            join_spoken_continuation("Xin.", "chào bạn."),
+            "Xin chào bạn.",
+        )
+        self.assertEqual(
+            join_spoken_continuation("Xin", "Xin chào bạn."),
+            "Xin Xin chào bạn.",
+        )
+
     def test_translation_repair_detects_punctuated_but_missing_last_sentence(self):
         live_router = load_live_router_without_provider_credentials()
         source = "Good morning everyone. The meeting starts at 9:00, sorry. at 10:00."
@@ -312,6 +379,20 @@ class TranscriptAssemblerTests(unittest.TestCase):
 
 
 class VADBoundaryTrackerTests(unittest.TestCase):
+    def test_two_second_breath_and_late_transcript_keep_boundary_pending(self):
+        tracker = VADBoundaryTracker(settle_ms=2500)
+        tracker.note_pause(10.0)
+        tracker.note_transcript(10.1)
+        state = dict(
+            has_source=True, has_translation=True,
+            source_sentence_complete=True, translation_sentence_complete=True,
+            speech_active=False,
+        )
+        self.assertFalse(tracker.is_ready(12.0, **state))
+        tracker.note_transcript(12.1)
+        self.assertFalse(tracker.is_ready(14.59, **state))
+        self.assertTrue(tracker.is_ready(14.60, **state))
+
     def test_pause_needs_both_transcripts_and_a_quiet_settle_window(self):
         tracker = VADBoundaryTracker(settle_ms=300)
         tracker.note_pause(1.0)
@@ -393,6 +474,32 @@ class VADBoundaryTrackerTests(unittest.TestCase):
 
 
 class TranscriptAssemblerRegressionTests(unittest.TestCase):
+    def test_shorter_canonical_update_keeps_last_interim_words_until_resolved(self):
+        transcript = TranscriptAssembler()
+        interim = "The meeting starts at nine, sorry, at ten."
+        transcript.set_source_preview(interim)
+
+        displayed = transcript.add_source_fragment("The meeting starts at nine.")
+
+        self.assertTrue(transcript.has_unconfirmed_source_tail())
+        self.assertEqual(displayed, interim)
+        self.assertEqual(transcript.source_for_save(force=True), interim)
+        self.assertEqual(transcript.source_for_save(), "The meeting starts at nine.")
+
+        transcript.add_source_fragment("The meeting starts at nine, sorry, at ten.")
+        self.assertFalse(transcript.has_unconfirmed_source_tail())
+        self.assertEqual(transcript.source_preview, "")
+        self.assertEqual(transcript.source_text, interim)
+
+    def test_explicit_finished_canonical_update_replaces_interim_tail(self):
+        transcript = TranscriptAssembler()
+        transcript.set_source_preview("The meeting starts at nine, sorry, at ten.")
+        displayed = transcript.add_source_fragment(
+            "The meeting starts at nine.", finished=True
+        )
+        self.assertEqual(displayed, "The meeting starts at nine.")
+        self.assertFalse(transcript.has_unconfirmed_source_tail())
+
     def test_multiple_turns_do_not_bleed_into_the_next_buffer(self):
         transcript = TranscriptAssembler()
         transcript.add_source_fragment("First sentence.")
@@ -565,6 +672,77 @@ class ProviderActivityProtocolTests(unittest.TestCase):
             config.translation_config.target_language_code,
             "vi",
         )
+
+    def test_automatic_mode_streams_every_frame_and_flushes_on_stop(self):
+        config = self.live_router._build_live_config(
+            "vi", provider_activity_mode="automatic"
+        )
+        self.assertIsNone(config.realtime_input_config)
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = []
+
+            async def send_realtime_input(self, **kwargs):
+                self.calls.append(kwargs)
+
+        provider = FakeProvider()
+        first = b"\x01\x00" * 1600
+        silence = b"\x00\x00" * 1600
+
+        async def send():
+            queue = asyncio.Queue()
+            for item in (
+                self.live_router._START_UTTERANCE,
+                first,
+                self.live_router._END_UTTERANCE,
+                silence,
+                None,
+            ):
+                await queue.put(item)
+            await self.live_router._forward_audio_queue(
+                queue, provider, activity_mode="automatic"
+            )
+
+        asyncio.run(send())
+        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(provider.calls[0]["audio"].data, first)
+        self.assertEqual(provider.calls[1]["audio"].data, silence)
+        self.assertEqual(provider.calls[2], {"audio_stream_end": True})
+
+    def test_hybrid_mode_flushes_at_local_pause_and_stop(self):
+        config = self.live_router._build_live_config(
+            "vi", provider_activity_mode="hybrid"
+        )
+        self.assertIsNone(config.realtime_input_config)
+
+        class FakeProvider:
+            def __init__(self):
+                self.calls = []
+
+            async def send_realtime_input(self, **kwargs):
+                self.calls.append(kwargs)
+
+        provider = FakeProvider()
+        first = b"\x01\x00" * 1600
+        silence = b"\x00\x00" * 1600
+
+        async def send():
+            queue = asyncio.Queue()
+            for item in (first, self.live_router._END_UTTERANCE, silence, None):
+                await queue.put(item)
+            await self.live_router._forward_audio_queue(
+                queue, provider, activity_mode="hybrid"
+            )
+
+        asyncio.run(send())
+        self.assertEqual(len(provider.calls), 4)
+        self.assertEqual(provider.calls[0]["audio"].data, first)
+        self.assertEqual(provider.calls[1], {"audio_stream_end": True})
+        self.assertEqual(provider.calls[2]["audio"].data, silence)
+        self.assertEqual(provider.calls[3], {"audio_stream_end": True})
+        self.assertFalse(any("activity_start" in call or "activity_end" in call
+                             for call in provider.calls))
 
 
 class LiveStopDrainTests(unittest.TestCase):
@@ -770,6 +948,79 @@ class LiveTranslationRepairTests(unittest.TestCase):
         self.assertFalse(did_recover)
         translate.assert_not_called()
 
+    def test_whole_source_confirmation_accepts_unpunctuated_spoken_sentence(self):
+        with mock.patch.object(
+            self.live_router.gemini_service,
+            "translate_text",
+            return_value={
+                "en": "Good morning everyone",
+                "vn": "Chào buổi sáng mọi người.",
+            },
+        ) as translate:
+            result = self.live_router._confirm_unpunctuated_stop_translation(
+                "Good morning everyone", "en", "vi"
+            )
+
+        self.assertEqual(result, "Chào buổi sáng mọi người.")
+        translate.assert_called_once_with("Good morning everyone", "en")
+
+    def test_empty_whole_source_confirmation_cannot_mark_segment_complete(self):
+        with mock.patch.object(
+            self.live_router.gemini_service,
+            "translate_text",
+            return_value={"en": "Good morning everyone", "vn": ""},
+        ):
+            with self.assertRaisesRegex(ValueError, "empty"):
+                self.live_router._confirm_unpunctuated_stop_translation(
+                    "Good morning everyone", "en", "vi"
+                )
+
+    def test_dangling_whole_source_translation_cannot_confirm_stop(self):
+        with mock.patch.object(
+            self.live_router.gemini_service,
+            "translate_text",
+            return_value={"en": "The meeting starts at ten", "vn": "Cuộc họp bắt đầu lúc"},
+        ):
+            with self.assertRaisesRegex(ValueError, "mid-phrase"):
+                self.live_router._confirm_unpunctuated_stop_translation(
+                    "The meeting starts at ten", "en", "vi"
+                )
+
+    def test_unpunctuated_source_stays_continuable_at_stop(self):
+        check = self.live_router._can_confirm_unpunctuated_stop_source
+        options = {"force": True, "stop_requested": True, "drain_reason": "quiet"}
+        self.assertFalse(check("Good morning everyone", "en", **options))
+        self.assertFalse(check(
+            "Good morning everyone", "en", force=False,
+            stop_requested=True, drain_reason="quiet",
+        ))
+        self.assertFalse(check(
+            "Good morning everyone", "en", force=True,
+            stop_requested=False, drain_reason="quiet",
+        ))
+        for reason in ("timeout", "audio_sender_error", "provider_closed"):
+            with self.subTest(reason=reason):
+                self.assertFalse(check(
+                    "Good morning everyone", "en", force=True,
+                    stop_requested=True, drain_reason=reason,
+                ))
+        self.assertFalse(check("The book is on the", "en", **options))
+        self.assertFalse(check("Xin", "vi", **options))
+        self.assertFalse(check("Xin chào bạn", "vi", **options))
+
+    def test_incomplete_xin_is_not_repaired_or_stream_committed(self):
+        translate = self.live_router.gemini_service.translate_text
+        translate.reset_mock()
+        self.assertFalse(self.live_router._stream_translation_ready_to_commit(
+            "Xin.", "Please.", "vi"
+        ))
+        recovered, did_recover = self.live_router._repair_translation_from_source(
+            "Xin.", "vi", "en", "Please."
+        )
+        self.assertEqual(recovered, "Please.")
+        self.assertFalse(did_recover)
+        translate.assert_not_called()
+
 
 class RetryEndpointTests(unittest.TestCase):
     @classmethod
@@ -945,6 +1196,92 @@ class SummaryInputEndpointTests(unittest.TestCase):
             [1, 2],
         )
 
+    def test_spoken_fragments_allow_finish_and_export_without_fake_translation(self):
+        with database.get_connection() as connection:
+            connection.execute("UPDATE sessions SET status='active', ended_at=NULL")
+            connection.execute("DELETE FROM segments WHERE session_id='session-test'")
+            connection.executemany(
+                """
+                INSERT INTO segments (
+                    segment_id, session_id, sequence_number, source_text,
+                    source_language, en, vn, status, created_at
+                ) VALUES (?, 'session-test', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        "00000000-0000-4000-8000-000000000001", 1,
+                        "The book is on the", "en", "The book is on the",
+                        None, "fragment", "2026-01-01T00:01:00+00:00",
+                    ),
+                    (
+                        "00000000-0000-4000-8000-000000000002", 2,
+                        "Xin chào.", "vi", "Hello.", "Xin chào.",
+                        "completed", "2026-01-01T00:02:00+00:00",
+                    ),
+                    (
+                        "00000000-0000-4000-8000-000000000003", 3,
+                        "Xin", "vi", None, "Xin",
+                        "fragment", "2026-01-01T00:03:00+00:00",
+                    ),
+                ],
+            )
+
+        transcript = self.main.get_session_transcript("session-test")
+        self.assertTrue(transcript.ready)
+        self.assertEqual(transcript.fragment_segments, 2)
+        self.assertEqual(transcript.failed_segments, 0)
+        self.assertEqual(transcript.pending_segments, 0)
+
+        with self.assertRaises(self.main.HTTPException) as retry_error:
+            self.main.retry_failed_segment(
+                "session-test", UUID("00000000-0000-4000-8000-000000000003")
+            )
+        self.assertEqual(retry_error.exception.status_code, 409)
+
+        finished = self.main.finish_session("session-test")
+        self.assertEqual(finished.status, "finished")
+        self.assertEqual(finished.fragment_segments, 2)
+        session_input = self.main.get_session_summary_input("session-test")
+        self.assertEqual(session_input.transcript_en, "The book is on the Hello.")
+        self.assertEqual(session_input.transcript_vn, "Xin chào. Xin")
+        self.assertEqual(
+            [segment.status for segment in session_input.segments],
+            ["fragment", "completed", "fragment"],
+        )
+        self.assertIsNone(session_input.segments[0].vn)
+        self.assertIsNone(session_input.segments[2].en)
+
+        presentation = self.main.finish_presentation("presentation-test")
+        self.assertEqual(presentation.status, "finished")
+        presentation_input = self.main.get_presentation_summary_input(
+            "presentation-test"
+        )
+        self.assertEqual(presentation_input.transcript_en, session_input.transcript_en)
+        self.assertEqual(presentation_input.transcript_vn, session_input.transcript_vn)
+        self.assertEqual(
+            [segment.status for segment in presentation_input.sessions[0].segments],
+            ["fragment", "completed", "fragment"],
+        )
+
+    def test_fragment_preview_is_exposed_but_not_used_as_final_summary_text(self):
+        with database.get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE segments SET status='fragment', source_text='The book is on the',
+                    en='The book is on the', vn='Quyển sách ở trên'
+                WHERE sequence_number=2
+                """
+            )
+
+        transcript = self.main.get_session_transcript("session-test")
+        self.assertEqual(transcript.segments[1].vn, "Quyển sách ở trên")
+        self.assertEqual(transcript.segments[1].status, "fragment")
+        exported = self.main.get_session_summary_input("session-test")
+        self.assertEqual(exported.segments[1].vn, "Quyển sách ở trên")
+        self.assertEqual(exported.segments[1].status, "fragment")
+        self.assertEqual(exported.transcript_en, "First point. The book is on the")
+        self.assertEqual(exported.transcript_vn, "Ý thứ nhất.")
+
     def test_presentation_summary_aggregates_finished_sessions_in_order(self):
         with database.get_connection() as connection:
             connection.execute(
@@ -1036,6 +1373,490 @@ class SummaryInputEndpointTests(unittest.TestCase):
         self.assertEqual(result.status, "finished")
         self.assertEqual(result.total_sessions, 2)
         self.assertEqual(result.finished_sessions, 2)
+
+class LiveWebSocketContinuationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.main = load_main_without_provider_credentials()
+        route = next(
+            route for route in cls.main.live_session_router.routes
+            if getattr(route, "path", None) == "/api/v1/live-sessions/{session_id}"
+        )
+        cls.router_globals = route.endpoint.__globals__
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory(
+            dir=Path(__file__).resolve().parent
+        )
+        self.original_database_path = database.DATABASE_PATH
+        database.DATABASE_PATH = Path(self.temp_dir.name) / "websocket-tests.sqlite3"
+        database.init_db()
+        with database.get_connection() as connection:
+            connection.execute(
+                "INSERT INTO presentations (presentation_id, status, started_at) "
+                "VALUES ('presentation-ws', 'active', '2026-01-01T00:00:00+00:00')"
+            )
+            connection.execute(
+                "INSERT INTO sessions "
+                "(session_id, presentation_id, session_number, status, started_at) "
+                "VALUES ('session-ws', 'presentation-ws', 1, 'active', "
+                "'2026-01-01T00:00:00+00:00')"
+            )
+
+    def tearDown(self):
+        database.DATABASE_PATH = self.original_database_path
+        self.temp_dir.cleanup()
+
+    def test_hybrid_vad_sends_continuous_audio_and_flushes_at_pause(self):
+        class PauseResponsiveProvider:
+            def __init__(self):
+                self.calls = []
+                self.events = asyncio.Queue()
+                self.responded = False
+
+            async def send_realtime_input(self, **kwargs):
+                self.calls.append(kwargs)
+                if not kwargs.get("audio_stream_end") or self.responded:
+                    return
+                self.responded = True
+                transcription = lambda text: SimpleNamespace(
+                    text=text, finished=True,
+                    start_offset=None, end_offset=None,
+                )
+                await self.events.put(SimpleNamespace(
+                    session_resumption_update=None, go_away=None,
+                    server_content=SimpleNamespace(
+                        interim_input_transcription=None,
+                        input_transcription=transcription("Hello."),
+                        output_transcription=transcription("Xin chào."),
+                        model_turn=None, generation_complete=False,
+                        turn_complete=False,
+                    ),
+                ))
+
+            async def receive(self):
+                while True:
+                    yield await self.events.get()
+
+        provider = PauseResponsiveProvider()
+        modes = []
+
+        @asynccontextmanager
+        async def fake_connect(agent, client, context, memory, **kwargs):
+            modes.append(kwargs.get("provider_activity_mode"))
+            yield provider, "fresh"
+
+        with (
+            mock.patch.object(GeminiTranslationAgent, "connect", fake_connect),
+            mock.patch.dict(self.router_globals, {
+                "LIVE_VAD_SILENCE_MS": 600,
+                "LIVE_VAD_MIN_SPEECH_MS": 200,
+                "LIVE_SEGMENT_SETTLE_MS": 30,
+                "LIVE_STOP_QUIET_MS": 50,
+                "LIVE_STOP_DRAIN_TIMEOUT_MS": 1000,
+            }),
+            TestClient(self.main.app) as client,
+            client.websocket_connect("/api/v1/live-sessions/session-ws") as ws,
+        ):
+            ws.send_json({
+                "type": "start", "target_language_code": "vi",
+                "provider_activity_mode": "hybrid",
+            })
+            ready = ws.receive_json()
+            self.assertEqual(ready["type"], "session_ready")
+            self.assertEqual(ready["vad"]["provider_activity_mode"], "hybrid")
+            for _ in range(3):
+                ws.send_bytes(b"\xff\x3f" * 1600)
+            for _ in range(6):
+                ws.send_bytes(b"\x00\x00" * 1600)
+            ws.send_json({"type": "stop"})
+            events = []
+            while True:
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "stream_stopped":
+                    break
+
+        self.assertEqual(modes, ["hybrid"])
+        self.assertEqual(sum("audio" in call for call in provider.calls), 9)
+        self.assertGreaterEqual(
+            sum(call.get("audio_stream_end", False) for call in provider.calls), 1
+        )
+        self.assertFalse(any(
+            "activity_start" in call or "activity_end" in call
+            for call in provider.calls
+        ))
+        self.assertIn("input_partial", [event["type"] for event in events])
+        self.assertIn("output_partial", [event["type"] for event in events])
+        finals = [event for event in events if event["type"] == "segment_final"]
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["source_text"], "Hello.")
+        self.assertEqual(finals[0]["vn"], "Xin chào.")
+        self.assertEqual(finals[0]["status"], "completed")
+        transcript = self.main.get_session_transcript("session-ws")
+        self.assertEqual(transcript.total_segments, 1)
+        trace = self.main.get_session_live_diagnostics("session-ws")
+        self.assertIn("provider_audio_stream_end", [
+            event["kind"] for event in trace["events"]
+        ])
+
+    def test_stop_preserves_newer_interim_tail_and_retranslates_full_source(self):
+        class ShortCanonicalProvider:
+            def __init__(self):
+                self.events = asyncio.Queue()
+
+            async def send_realtime_input(self, **kwargs):
+                if "activity_end" not in kwargs:
+                    return
+                transcription = lambda text: SimpleNamespace(
+                    text=text, finished=False,
+                    start_offset=None, end_offset=None,
+                )
+                await self.events.put(SimpleNamespace(
+                    session_resumption_update=None, go_away=None,
+                    server_content=SimpleNamespace(
+                        interim_input_transcription=transcription(
+                            "The meeting starts at nine, sorry, at ten."
+                        ),
+                        input_transcription=transcription(
+                            "The meeting starts at nine."
+                        ),
+                        output_transcription=transcription(
+                            "Cuộc họp bắt đầu lúc chín giờ."
+                        ),
+                        model_turn=None, generation_complete=False,
+                        turn_complete=False,
+                    ),
+                ))
+
+            async def receive(self):
+                while True:
+                    yield await self.events.get()
+
+        @asynccontextmanager
+        async def fake_connect(agent, client, context, memory, **kwargs):
+            yield ShortCanonicalProvider(), "fresh"
+
+        with (
+            mock.patch.object(GeminiTranslationAgent, "connect", fake_connect),
+            mock.patch.dict(self.router_globals, {
+                "LIVE_STOP_QUIET_MS": 50,
+                "LIVE_STOP_DRAIN_TIMEOUT_MS": 1000,
+            }),
+            mock.patch.object(
+                self.router_globals["gemini_service"],
+                "translate_text",
+                return_value={
+                    "en": "The meeting starts at nine, sorry, at ten.",
+                    "vn": "Cuộc họp bắt đầu lúc mười giờ.",
+                },
+            ) as translate,
+            TestClient(self.main.app) as client,
+            client.websocket_connect("/api/v1/live-sessions/session-ws") as ws,
+        ):
+            ws.send_json({"type": "start", "target_language_code": "vi"})
+            self.assertEqual(ws.receive_json()["type"], "session_ready")
+            for _ in range(3):
+                ws.send_bytes(b"\xff\x3f" * 1600)
+            ws.send_json({"type": "stop"})
+            events = []
+            while True:
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "stream_stopped":
+                    break
+
+        previews = [e["text"] for e in events if e["type"] == "input_partial"]
+        final = next(e for e in events if e["type"] == "segment_final")
+        self.assertIn("The meeting starts at nine, sorry, at ten.", previews)
+        self.assertEqual(final["source_text"], previews[-1])
+        self.assertEqual(final["vn"], "Cuộc họp bắt đầu lúc mười giờ.")
+        self.assertEqual(final["status"], "completed")
+        translate.assert_called_once_with(
+            "The meeting starts at nine, sorry, at ten.", "en"
+        )
+        trace = self.main.get_session_live_diagnostics("session-ws")
+        event_kinds = [event["kind"] for event in trace["events"]]
+        self.assertLess(
+            event_kinds.index("provider_source_interim"),
+            event_kinds.index("provider_source"),
+        )
+        self.assertIn("provider_activity_end", event_kinds)
+        self.assertLess(
+            event_kinds.index("provider_source"),
+            event_kinds.index(
+                "source_partial_sent", event_kinds.index("provider_source")
+            ),
+        )
+        self.assertLess(
+            event_kinds.index("provider_translation"),
+            event_kinds.index("translation_partial_sent"),
+        )
+        self.assertEqual(
+            next(
+                event["text_tail"] for event in trace["events"]
+                if event["kind"] == "provider_source_interim"
+            ),
+            "The meeting starts at nine, sorry, at ten.",
+        )
+
+    def test_text_partials_arrive_without_audio_and_audio_can_be_enabled(self):
+        class AudioProvider:
+            def __init__(self):
+                self.events = asyncio.Queue()
+
+            async def send_realtime_input(self, **kwargs):
+                if "activity_end" not in kwargs:
+                    return
+                transcription = lambda text: SimpleNamespace(
+                    text=text, finished=False,
+                    start_offset=None, end_offset=None,
+                )
+                content = SimpleNamespace(
+                    interim_input_transcription=None,
+                    input_transcription=transcription("Hello."),
+                    output_transcription=transcription("Xin chào."),
+                    model_turn=SimpleNamespace(parts=[SimpleNamespace(
+                        inline_data=SimpleNamespace(
+                            data=b"\x01\x00" * 2400,
+                            mime_type="audio/pcm;rate=24000",
+                        ),
+                    )]),
+                    generation_complete=False,
+                    turn_complete=False,
+                )
+                await self.events.put(SimpleNamespace(
+                    session_resumption_update=None,
+                    go_away=None,
+                    server_content=content,
+                ))
+
+            async def receive(self):
+                while True:
+                    yield await self.events.get()
+
+        @asynccontextmanager
+        async def fake_connect(agent, client, context, memory, **kwargs):
+            yield AudioProvider(), "fresh"
+
+        def collect_events(client, *, enable_after_start):
+            events = []
+            with client.websocket_connect("/api/v1/live-sessions/session-ws") as ws:
+                ws.send_json({
+                    "type": "start", "target_language_code": "vi",
+                    "speech_output_enabled": False,
+                })
+                self.assertEqual(ws.receive_json()["type"], "session_ready")
+                if enable_after_start:
+                    ws.send_json({"type": "set_speech_output", "enabled": True})
+                for _ in range(3):
+                    ws.send_bytes(b"\xff\x3f" * 1600)
+                ws.send_json({"type": "stop"})
+                while True:
+                    event = ws.receive_json()
+                    events.append(event)
+                    if event["type"] == "stream_stopped":
+                        return events
+
+        with (
+            mock.patch.object(GeminiTranslationAgent, "connect", fake_connect),
+            mock.patch.dict(self.router_globals, {
+                "LIVE_STOP_QUIET_MS": 50,
+                "LIVE_STOP_DRAIN_TIMEOUT_MS": 1000,
+            }),
+            TestClient(self.main.app) as client,
+        ):
+            text_only = collect_events(client, enable_after_start=False)
+            with_audio = collect_events(client, enable_after_start=True)
+
+        for events in (text_only, with_audio):
+            types_seen = [event["type"] for event in events]
+            self.assertIn("input_partial", types_seen)
+            self.assertIn("output_partial", types_seen)
+            self.assertIn("segment_final", types_seen)
+        self.assertNotIn("translated_audio", [event["type"] for event in text_only])
+        self.assertIn("translated_audio", [event["type"] for event in with_audio])
+
+    def test_stop_then_continue_revises_same_segment_over_websocket(self):
+        class FakeProviderSession:
+            def __init__(self, source, translation):
+                self.source = source
+                self.translation = translation
+                self.events = asyncio.Queue()
+
+            async def send_realtime_input(self, **kwargs):
+                if "activity_end" not in kwargs:
+                    return
+                source = SimpleNamespace(
+                    text=self.source, finished=False,
+                    start_offset=None, end_offset=None,
+                )
+                target = SimpleNamespace(
+                    text=self.translation, finished=False,
+                    start_offset=None, end_offset=None,
+                )
+                content = SimpleNamespace(
+                    interim_input_transcription=None,
+                    input_transcription=source,
+                    output_transcription=target,
+                    model_turn=None,
+                    generation_complete=False,
+                    turn_complete=False,
+                )
+                await self.events.put(SimpleNamespace(
+                    session_resumption_update=None,
+                    go_away=None,
+                    server_content=content,
+                ))
+
+            async def receive(self):
+                while True:
+                    yield await self.events.get()
+
+        providers = [
+            FakeProviderSession("Xin", "Thank you."),
+            FakeProviderSession("chào bạn.", "Hello."),
+        ]
+
+        @asynccontextmanager
+        async def fake_connect(agent, client, context, memory, **kwargs):
+            yield providers.pop(0), "fresh"
+
+        def run_stream(client):
+            events = []
+            with client.websocket_connect("/api/v1/live-sessions/session-ws") as ws:
+                ws.send_json({
+                    "type": "start", "target_language_code": "en",
+                    "continue_fragment": True,
+                })
+                ready = ws.receive_json()
+                self.assertEqual(ready["type"], "session_ready")
+                for _ in range(3):
+                    ws.send_bytes(b"\xff\x3f" * 1600)
+                ws.send_json({"type": "stop"})
+                while True:
+                    event = ws.receive_json()
+                    events.append(event)
+                    if event["type"] == "stream_stopped":
+                        break
+            return ready, [event for event in events if event["type"] == "segment_final"]
+
+        with (
+            mock.patch.object(
+                GeminiTranslationAgent,
+                "connect", fake_connect,
+            ),
+            mock.patch.dict(self.router_globals, {
+                "LIVE_STOP_QUIET_MS": 50,
+                "LIVE_STOP_DRAIN_TIMEOUT_MS": 1000,
+            }),
+            mock.patch.object(
+                self.router_globals["gemini_service"],
+                "translate_text",
+                return_value={"en": "Hello.", "vn": "Xin chào bạn."},
+            ) as translate,
+            TestClient(self.main.app) as client,
+        ):
+            first_ready, first_segments = run_stream(client)
+            second_ready, second_segments = run_stream(client)
+
+        self.assertIsNone(first_ready["continuation_fragment_id"])
+        self.assertEqual(len(first_segments), 1)
+        self.assertEqual(first_segments[0]["status"], "fragment")
+        self.assertEqual(first_segments[0]["en"], "Thank you.")
+        self.assertEqual(
+            second_ready["continuation_fragment_id"],
+            first_segments[0]["segment_id"],
+        )
+        self.assertEqual(len(second_segments), 1)
+        self.assertEqual(second_segments[0]["segment_id"], first_segments[0]["segment_id"])
+        self.assertEqual(second_segments[0]["source_text"], "Xin chào bạn.")
+        self.assertEqual(second_segments[0]["en"], "Hello.")
+        self.assertEqual(second_segments[0]["status"], "completed")
+        translate.assert_called_once_with("Xin chào bạn.", "vi")
+
+        transcript = self.main.get_session_transcript("session-ws")
+        self.assertEqual(transcript.total_segments, 1)
+        self.assertEqual(transcript.completed_segments, 1)
+        self.assertEqual(transcript.fragment_segments, 0)
+
+    def test_late_final_words_after_stop_are_drained_before_persistence(self):
+        def response(source_text, translated_text, *, generation_complete=False):
+            def transcription(text):
+                return SimpleNamespace(
+                    text=text, finished=False,
+                    start_offset=None, end_offset=None,
+                )
+            return SimpleNamespace(
+                session_resumption_update=None, go_away=None,
+                server_content=SimpleNamespace(
+                    interim_input_transcription=None,
+                    input_transcription=transcription(source_text),
+                    output_transcription=transcription(translated_text),
+                    model_turn=None,
+                    generation_complete=generation_complete,
+                    turn_complete=False,
+                ),
+            )
+
+        class LateProvider:
+            def __init__(self):
+                self.events = asyncio.Queue()
+
+            async def send_realtime_input(self, **kwargs):
+                if "activity_end" not in kwargs:
+                    return
+                await self.events.put(response(
+                    "Good morning everyone. The meeting starts at 9:00.",
+                    "Chào buổi sáng mọi người. Cuộc họp bắt đầu lúc 9 giờ.",
+                    generation_complete=True,
+                ))
+
+                async def send_late_tail():
+                    await asyncio.sleep(0.03)
+                    await self.events.put(response(
+                        " Sorry, at 10:00.", " Xin lỗi, lúc 10 giờ."
+                    ))
+
+                asyncio.create_task(send_late_tail())
+
+            async def receive(self):
+                while True:
+                    yield await self.events.get()
+
+        @asynccontextmanager
+        async def fake_connect(agent, client, context, memory, **kwargs):
+            yield LateProvider(), "fresh"
+
+        with (
+            mock.patch.object(GeminiTranslationAgent, "connect", fake_connect),
+            mock.patch.dict(self.router_globals, {
+                "LIVE_STOP_QUIET_MS": 100,
+                "LIVE_STOP_DRAIN_TIMEOUT_MS": 1000,
+            }),
+            TestClient(self.main.app) as client,
+            client.websocket_connect("/api/v1/live-sessions/session-ws") as ws,
+        ):
+            ws.send_json({"type": "start", "target_language_code": "vi"})
+            self.assertEqual(ws.receive_json()["type"], "session_ready")
+            for _ in range(3):
+                ws.send_bytes(b"\xff\x3f" * 1600)
+            ws.send_json({"type": "stop"})
+            final = None
+            while True:
+                event = ws.receive_json()
+                if event["type"] == "segment_final":
+                    final = event
+                if event["type"] == "stream_stopped":
+                    break
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final["status"], "completed")
+        self.assertTrue(final["source_text"].endswith("Sorry, at 10:00."))
+        self.assertTrue(final["vn"].endswith("Xin lỗi, lúc 10 giờ."))
+        transcript = self.main.get_session_transcript("session-ws")
+        self.assertEqual(transcript.segments[0].source_text, final["source_text"])
+
 
 class LiveSegmentPersistenceTests(unittest.TestCase):
     @classmethod
@@ -1149,6 +1970,76 @@ class LiveSegmentPersistenceTests(unittest.TestCase):
         self.assertEqual(saved["en"], "I have one more point.")
         self.assertIsNone(saved["vn"])
         self.assertEqual(saved["status"], "failed")
+
+    def test_unverified_translation_keeps_preview_but_is_not_completed(self):
+        saved = self.live_router._save_live_segment(
+            "session-test", "vi",
+            "The meeting starts at nine, sorry, at ten.",
+            "Cuộc họp bắt đầu lúc chín giờ.",
+            translation_unverified=True,
+        )
+        self.assertEqual(saved["source_text"], "The meeting starts at nine, sorry, at ten.")
+        self.assertEqual(saved["vn"], "Cuộc họp bắt đầu lúc chín giờ.")
+        self.assertEqual(saved["status"], "failed")
+
+    def test_explicit_confirmation_can_complete_unpunctuated_source(self):
+        source = "Good morning everyone"
+        translated = "Chào buổi sáng mọi người."
+        unconfirmed = self.live_router._save_live_segment(
+            "session-test", "vi", source, translated
+        )
+        confirmed = self.live_router._save_live_segment(
+            "session-test", "vi", source, translated,
+            stop_source_confirmed=True,
+        )
+
+        self.assertEqual(unconfirmed["status"], "failed")
+        self.assertEqual(confirmed["status"], "completed")
+        self.assertEqual(confirmed["source_text"], source)
+        self.assertEqual(confirmed["vn"], translated)
+
+    def test_stop_confirmation_without_translation_still_fails(self):
+        saved = self.live_router._save_live_segment(
+            "session-test", "vi", "Good morning everyone", "",
+            stop_source_confirmed=True,
+        )
+        self.assertEqual(saved["status"], "failed")
+
+    def test_stop_confirmation_does_not_override_dangling_source(self):
+        saved = self.live_router._save_live_segment(
+            "session-test", "vi", "The book is on the",
+            "Quyển sách ở trên", stop_source_confirmed=True,
+        )
+        self.assertEqual(saved["status"], "failed")
+
+    def test_stop_confirmation_does_not_override_dangling_translation(self):
+        saved = self.live_router._save_live_segment(
+            "session-test", "vi", "The meeting starts at ten",
+            "Cuộc họp bắt đầu lúc", stop_source_confirmed=True,
+        )
+        self.assertEqual(saved["status"], "failed")
+
+    def test_spoken_xin_retains_provisional_translation_as_a_fragment(self):
+        for source in ("Xin", "Xin."):
+            with self.subTest(source=source):
+                saved = self.live_router._save_live_segment(
+                    "session-test", "en", source, "Thank you.",
+                    source_fragment=True,
+                )
+                self.assertEqual(saved["source_text"], source)
+                self.assertEqual(saved["status"], "fragment")
+                self.assertEqual(saved["vn"], source)
+                self.assertEqual(saved["en"], "Thank you.")
+
+        provider_failure = self.live_router._save_live_segment(
+            "session-test", "en", "Xin", "Thank you.",
+        )
+        self.assertEqual(provider_failure["status"], "failed")
+
+        complete = self.live_router._save_live_segment(
+            "session-test", "en", "Xin chào bạn.", "Hello.",
+        )
+        self.assertEqual(complete["status"], "completed")
 
     def test_nonempty_but_truncated_translation_is_not_marked_completed(self):
         saved = self.live_router._save_live_segment(

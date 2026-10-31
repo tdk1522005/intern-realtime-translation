@@ -17,6 +17,10 @@ from live_agents import LiveSessionOrchestrator, next_segment_id
 from transcript_assembler import (
     count_sentence_endings,
     ends_with_sentence_punctuation,
+    is_source_fragment_at_stop,
+    is_unfinished_standalone_phrase,
+    join_spoken_continuation,
+    plausible_unpunctuated_stop_source,
 )
 from stop_drain import StopDrainWindow
 
@@ -40,11 +44,16 @@ def _translation_needs_repair(source_text: str, translated_text: str) -> bool:
 def _stream_translation_ready_to_commit(
     source_text: str,
     translated_text: str,
+    source_language: str | None = None,
 ) -> bool:
     """A streamed translation is safe to persist only when sentence shape agrees."""
     return bool(
         source_text.strip()
         and translated_text.strip()
+        and not (
+            source_language
+            and is_unfinished_standalone_phrase(source_text, source_language)
+        )
         and not _translation_needs_repair(source_text, translated_text)
     )
 
@@ -56,9 +65,9 @@ AUDIO_QUEUE_SIZE = 20
 LIVE_VAD_RMS_THRESHOLD = float(os.getenv("LIVE_VAD_RMS_THRESHOLD", "450"))
 LIVE_VAD_MIN_SPEECH_MS = int(os.getenv("LIVE_VAD_MIN_SPEECH_MS", "200"))
 LIVE_VAD_SILENCE_MS = int(os.getenv("LIVE_VAD_SILENCE_MS", "600"))
-LIVE_SEGMENT_SETTLE_MS = int(os.getenv("LIVE_SEGMENT_SETTLE_MS", "300"))
+LIVE_SEGMENT_SETTLE_MS = int(os.getenv("LIVE_SEGMENT_SETTLE_MS", "2500"))
 LIVE_STOP_DRAIN_TIMEOUT_MS = int(os.getenv("LIVE_STOP_DRAIN_TIMEOUT_MS", "20000"))
-LIVE_STOP_QUIET_MS = int(os.getenv("LIVE_STOP_QUIET_MS", "1500"))
+LIVE_STOP_QUIET_MS = int(os.getenv("LIVE_STOP_QUIET_MS", "2500"))
 LIVE_STOP_TRANSLATION_REPAIR_TIMEOUT_MS = int(
     os.getenv("LIVE_STOP_TRANSLATION_REPAIR_TIMEOUT_MS", "15000")
 )
@@ -78,6 +87,8 @@ def _repair_translation_from_source(
     source_language: str,
     target_language: str,
     current_translation: str,
+    *,
+    force_retranslate: bool = False,
 ) -> tuple[str, bool]:
     """Replace an unfinished Live translation with a full text translation.
 
@@ -85,9 +96,14 @@ def _repair_translation_from_source(
     sentence-complete source is safer to translate again as one complete unit
     than to present the last streamed fragment as a successful translation.
     """
-    if not ends_with_sentence_punctuation(source_text):
+    if (
+        not ends_with_sentence_punctuation(source_text)
+        or is_unfinished_standalone_phrase(source_text, source_language)
+    ):
         return current_translation, False
-    if not _translation_needs_repair(source_text, current_translation):
+    if not force_retranslate and not _translation_needs_repair(
+        source_text, current_translation
+    ):
         return current_translation, False
 
     translated = gemini_service.translate_text(source_text, source_language)
@@ -101,6 +117,62 @@ def _repair_translation_from_source(
     return candidate, candidate != current_translation
 
 
+def _confirm_unpunctuated_stop_translation(
+    source_text: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+    """Translate the entire stable source before accepting a punctuation-free Stop."""
+    result = gemini_service.translate_text(source_text, source_language)
+    key = "en" if target_language == "en" else "vn"
+    candidate = result.get(key, "")
+    if not isinstance(candidate, str) or not candidate.strip():
+        raise ValueError("The full-source translation was empty.")
+    candidate = candidate.strip()
+    if not (
+        ends_with_sentence_punctuation(candidate)
+        or plausible_unpunctuated_stop_source(candidate, target_language)
+    ):
+        raise ValueError("The full-source translation ended mid-phrase.")
+    return candidate
+
+
+def _translate_continued_source(
+    source_text: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+    """Translate the full joined phrase; Live output covers only the new audio."""
+    result = gemini_service.translate_text(source_text, source_language)
+    candidate = result.get(target_language, "")
+    if not isinstance(candidate, str) or not candidate.strip():
+        raise ValueError("The continued phrase translation was empty.")
+    candidate = candidate.strip()
+    if not (
+        ends_with_sentence_punctuation(candidate)
+        or plausible_unpunctuated_stop_source(candidate, target_language)
+    ):
+        raise ValueError("The continued phrase translation ended mid-phrase.")
+    return candidate
+
+
+def _can_confirm_unpunctuated_stop_source(
+    source_text: str,
+    source_language: str,
+    *,
+    force: bool,
+    stop_requested: bool,
+    drain_reason: str,
+) -> bool:
+    return bool(
+        force
+        and stop_requested
+        and drain_reason in {"quiet", "provider_complete"}
+        and plausible_unpunctuated_stop_source(source_text, source_language)
+        and not is_source_fragment_at_stop(source_text, source_language)
+    )
+
+
 async def _wait_for_live_drain(
     provider_task: asyncio.Task,
     activity_changed: asyncio.Event,
@@ -111,7 +183,7 @@ async def _wait_for_live_drain(
 
     while True:
         if provider_task.done():
-            return "provider_closed"
+            return "provider_complete" if window.terminal_at is not None else "provider_closed"
 
         now = loop.time()
         decision = window.decision(now)
@@ -128,7 +200,7 @@ async def _wait_for_live_drain(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if provider_task in done:
-                return "provider_closed"
+                return "provider_complete" if window.terminal_at is not None else "provider_closed"
             if wake_task not in done:
                 decision = window.decision(loop.time())
                 if decision is not None:
@@ -159,6 +231,9 @@ def _save_live_segment(
     translated_text: str,
     *,
     translation_repaired: bool = False,
+    translation_unverified: bool = False,
+    stop_source_confirmed: bool = False,
+    source_fragment: bool = False,
     segment_id: str | None = None,
 ) -> dict:
     """Compatibility helper that delegates persistence to the memory agent."""
@@ -175,23 +250,59 @@ def _save_live_segment(
         source_text,
         translated_text,
         translation_repaired=translation_repaired,
+        translation_unverified=translation_unverified,
+        stop_source_confirmed=stop_source_confirmed,
+        source_fragment=source_fragment,
         segment_id=segment_id or context.pending_segment_id,
     )
 
 
-async def _forward_audio_queue(audio_queue, provider_session) -> None:
-    """Send manually delimited utterances over one persistent Live session."""
+async def _forward_audio_queue(
+    audio_queue, provider_session, on_marker=None, *, activity_mode="manual"
+) -> None:
+    """Forward audio with the selected provider activity protocol."""
+    if activity_mode not in {"manual", "automatic", "hybrid"}:
+        raise ValueError("activity_mode must be manual, automatic or hybrid.")
     utterance_active = False
+    audio_since_end = False
 
     while True:
         audio_chunk = await audio_queue.get()
 
         if audio_chunk is None:
+            if activity_mode in {"automatic", "hybrid"}:
+                if audio_since_end:
+                    await provider_session.send_realtime_input(audio_stream_end=True)
+                    if on_marker:
+                        on_marker("provider_audio_stream_end")
+                return
             if utterance_active:
                 await provider_session.send_realtime_input(
                     activity_end=types.ActivityEnd()
                 )
+                if on_marker:
+                    on_marker("provider_activity_end")
             return
+
+        if activity_mode in {"automatic", "hybrid"}:
+            if isinstance(audio_chunk, bytes):
+                await provider_session.send_realtime_input(
+                    audio=types.Blob(
+                        data=audio_chunk,
+                        mime_type="audio/pcm;rate=16000",
+                    )
+                )
+                audio_since_end = True
+            elif (
+                activity_mode == "hybrid"
+                and audio_chunk is _END_UTTERANCE
+                and audio_since_end
+            ):
+                await provider_session.send_realtime_input(audio_stream_end=True)
+                if on_marker:
+                    on_marker("provider_audio_stream_end")
+                audio_since_end = False
+            continue
 
         action, utterance_active = _provider_action_for_audio_item(
             audio_chunk,
@@ -203,11 +314,15 @@ async def _forward_audio_queue(audio_queue, provider_session) -> None:
             await provider_session.send_realtime_input(
                 activity_start=types.ActivityStart()
             )
+            if on_marker:
+                on_marker("provider_activity_start")
             continue
         if action == "activity_end":
             await provider_session.send_realtime_input(
                 activity_end=types.ActivityEnd()
             )
+            if on_marker:
+                on_marker("provider_activity_end")
             continue
 
         await provider_session.send_realtime_input(
@@ -218,10 +333,12 @@ async def _forward_audio_queue(audio_queue, provider_session) -> None:
         )
 
 
-def _build_live_config(target_language: str):
-    """Build Live Translate config with client-controlled speech boundaries."""
+def _build_live_config(
+    target_language: str, provider_activity_mode: str = "manual"
+):
+    """Build Live Translate config for manual or provider-side VAD."""
     return LiveSessionOrchestrator(LIVE_MODEL).translation.build_config(
-        target_language
+        target_language, provider_activity_mode=provider_activity_mode
     )
 
 
@@ -304,6 +421,37 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
+        continue_fragment = start_message.get("continue_fragment", True)
+        if not isinstance(continue_fragment, bool):
+            await send_event({
+                "type": "error",
+                "message": "continue_fragment must be a boolean.",
+            })
+            await websocket.close(code=1008)
+            return
+
+        # Existing API clients continue receiving audio unless they opt out.
+        # The built-in page sends its checkbox state explicitly.
+        speech_output_enabled = start_message.get("speech_output_enabled", True)
+        if not isinstance(speech_output_enabled, bool):
+            await send_event({
+                "type": "error",
+                "message": "speech_output_enabled must be a boolean.",
+            })
+            await websocket.close(code=1008)
+            return
+
+        provider_activity_mode = start_message.get(
+            "provider_activity_mode", "manual"
+        )
+        if provider_activity_mode not in {"manual", "automatic", "hybrid"}:
+            await send_event({
+                "type": "error",
+                "message": "provider_activity_mode must be manual, automatic or hybrid.",
+            })
+            await websocket.close(code=1008)
+            return
+
         connection_lock_acquired = await orchestrator.connections.try_acquire(
             session_id
         )
@@ -331,6 +479,13 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
+        continuation_row = (
+            await asyncio.to_thread(
+                orchestrator.memory.load_last_fragment, session_context
+            )
+            if continue_fragment else None
+        )
+
         source_language = session_context.source_language
         pause_detector = orchestrator.audio.create_detector(
             rms_threshold=LIVE_VAD_RMS_THRESHOLD,
@@ -345,11 +500,14 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
         boundary_wakeup = asyncio.Event()
         turn_boundary_seen = False
         segments_saved = 0
+        fragments_saved = 0
         translation_repairs = 0
+        stop_source_confirmations = 0
         vad_finalized_segments = 0
         vad_merged_pauses = 0
         pause_count = 0
         input_transcription_events = 0
+        input_interim_events = 0
         output_transcription_events = 0
         input_finished_events = 0
         output_finished_events = 0
@@ -368,6 +526,18 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
         stop_drain_elapsed_ms = 0.0
         audio_sender_failed = False
         latency_tracker = orchestrator.metrics.create_tracker()
+        trace_started_at = asyncio.get_running_loop().time()
+        event_trace: deque[dict] = deque(maxlen=200)
+
+        def record_trace(kind: str, text: str = "") -> None:
+            event_trace.append({
+                "elapsed_ms": round(
+                    (asyncio.get_running_loop().time() - trace_started_at) * 1000
+                ),
+                "kind": kind,
+                "text_tail": text[-80:] if text else None,
+                "audio_queue_depth": audio_queue.qsize(),
+            })
 
         def note_transcript_activity() -> None:
             nonlocal last_transcript_event_at
@@ -395,21 +565,43 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             transcript_activity_changed.set()
 
         async def finalize_segment(force: bool = False) -> bool:
-            nonlocal turn_boundary_seen, segments_saved
+            nonlocal turn_boundary_seen, segments_saved, fragments_saved
             nonlocal translation_repairs
+            nonlocal stop_source_confirmations
             nonlocal pending_segment_id
+            nonlocal continuation_row
             translation_recovered = False
+            translation_verified = False
+            stop_source_confirmed = False
+            source_fragment = False
 
             async with transcript_lock:
+                preview_extends_source = transcript.has_unconfirmed_source_tail()
                 source_text = transcript.source_for_save(force=force).strip()
                 translated_text = transcript.translated_text.strip()
 
                 if not source_text:
                     return False
 
+                continued_source = (
+                    join_spoken_continuation(
+                        continuation_row["source_text"], source_text
+                    )
+                    if continuation_row else source_text
+                )
+
+                source_fragment = bool(
+                    force
+                    and stop_requested_at is not None
+                    and stop_drain_reason in {"quiet", "provider_complete"}
+                    and is_source_fragment_at_stop(continued_source, source_language)
+                )
+
                 # Live Translate streams continuously, so a local VAD pause
                 # or a provider boundary must be observed before committing.
                 if not force:
+                    if preview_extends_source:
+                        return False
                     if not turn_boundary_seen or not translated_text:
                         return False
                     # A period at the end is not enough: the live model can
@@ -419,6 +611,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                     if not _stream_translation_ready_to_commit(
                         source_text,
                         translated_text,
+                        source_language,
                     ):
                         return False
 
@@ -426,11 +619,51 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 # markers. After Stop, repair an unfinished streamed translation
                 # from the complete source before persisting it. This is a
                 # finalization fallback only; normal live partials remain fast.
-                repair_needed = _translation_needs_repair(
+                # The current conservative policy keeps punctuation-free Stop
+                # text as a continuable fragment. The confirmation branch is
+                # retained for compatibility but its guard rejects fragments.
+                if not continuation_row and _can_confirm_unpunctuated_stop_source(
                     source_text,
-                    translated_text,
-                )
-                if force and repair_needed:
+                    source_language,
+                    force=force,
+                    stop_requested=stop_requested_at is not None,
+                    drain_reason=stop_drain_reason,
+                ):
+                    try:
+                        confirmed_translation = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _confirm_unpunctuated_stop_translation,
+                                source_text,
+                                source_language,
+                                target_language,
+                            ),
+                            timeout=LIVE_STOP_TRANSLATION_REPAIR_TIMEOUT_MS / 1000,
+                        )
+                        stop_source_confirmed = True
+                        translation_recovered = (
+                            confirmed_translation != translated_text
+                        )
+                        translated_text = confirmed_translation
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Timed out confirming the punctuation-free final source for session %s.",
+                            session_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not confirm the punctuation-free final source for session %s.",
+                            session_id,
+                        )
+
+                repair_needed = _translation_needs_repair(
+                    source_text, translated_text
+                ) or (force and preview_extends_source)
+                if (
+                    force and repair_needed
+                    and not stop_source_confirmed
+                    and not source_fragment
+                    and not continuation_row
+                ):
                     try:
                         translated_text, translation_repaired = await asyncio.wait_for(
                             asyncio.to_thread(
@@ -439,10 +672,12 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                                 source_language,
                                 target_language,
                                 translated_text,
+                                force_retranslate=preview_extends_source,
                             ),
                             timeout=LIVE_STOP_TRANSLATION_REPAIR_TIMEOUT_MS / 1000,
                         )
                         translation_recovered = translation_repaired
+                        translation_verified = True
                     except asyncio.TimeoutError:
                         logger.warning(
                             "Timed out repairing the final live translation for session %s.",
@@ -456,24 +691,96 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
 
                 if translation_recovered:
                     translation_repairs += 1
+                if stop_source_confirmed:
+                    stop_source_confirmations += 1
 
-                saved = await asyncio.to_thread(
-                    orchestrator.memory.save_live_segment,
-                    session_context,
-                    source_text,
-                    translated_text,
-                    translation_repaired=translation_recovered,
-                    segment_id=pending_segment_id,
-                )
+                if continuation_row:
+                    old_target = (
+                        continuation_row["en"] if target_language == "en"
+                        else continuation_row["vn"]
+                    ) or ""
+                    preview_translation = " ".join(
+                        part for part in (old_target, translated_text) if part
+                    )
+                    if source_fragment:
+                        continuation_status = "fragment"
+                        final_translation = preview_translation
+                    else:
+                        continuation_status = "failed"
+                        final_translation = preview_translation
+                        clean_finalization = not force or (
+                            stop_requested_at is not None
+                            and stop_drain_reason in {"quiet", "provider_complete"}
+                        )
+                        source_complete = clean_finalization and (
+                            (
+                                ends_with_sentence_punctuation(continued_source)
+                                and not is_unfinished_standalone_phrase(
+                                    continued_source, source_language
+                                )
+                            )
+                            or _can_confirm_unpunctuated_stop_source(
+                                continued_source,
+                                source_language,
+                                force=force,
+                                stop_requested=stop_requested_at is not None,
+                                drain_reason=stop_drain_reason,
+                            )
+                        )
+                        if source_complete:
+                            try:
+                                final_translation = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        _translate_continued_source,
+                                        continued_source,
+                                        source_language,
+                                        target_language,
+                                    ),
+                                    timeout=LIVE_STOP_TRANSLATION_REPAIR_TIMEOUT_MS / 1000,
+                                )
+                                continuation_status = "completed"
+                                translation_recovered = True
+                                translation_repairs += 1
+                            except Exception:
+                                logger.exception(
+                                    "Could not translate continued fragment for session %s.",
+                                    session_id,
+                                )
+                    saved = await asyncio.to_thread(
+                        orchestrator.memory.revise_last_fragment,
+                        session_context,
+                        continuation_row,
+                        continued_source,
+                        final_translation,
+                        status=continuation_status,
+                    )
+                    continuation_row = saved if saved["status"] == "fragment" else None
+                else:
+                    saved = await asyncio.to_thread(
+                        orchestrator.memory.save_live_segment,
+                        session_context,
+                        source_text,
+                        translated_text,
+                        translation_repaired=translation_recovered,
+                        translation_unverified=(
+                            force and preview_extends_source
+                            and not translation_verified
+                            and not source_fragment
+                        ),
+                        stop_source_confirmed=stop_source_confirmed,
+                        source_fragment=source_fragment,
+                        segment_id=pending_segment_id,
+                    )
+                    pending_segment_id = next_segment_id(
+                        session_id, pending_segment_id
+                    )
 
                 transcript.reset()
                 boundary_tracker.reset()
                 turn_boundary_seen = False
                 segments_saved += 1
-                pending_segment_id = next_segment_id(
-                    session_id,
-                    pending_segment_id,
-                )
+                if saved["status"] == "fragment":
+                    fragments_saved += 1
 
             await send_event({
                 "type": "segment_final",
@@ -487,8 +794,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 "vn": saved["vn"],
                 "status": saved["status"],
                 "translation_recovered": translation_recovered,
+                "source_confirmed_without_punctuation": stop_source_confirmed,
                 "created_at": saved["created_at"],
             })
+            record_trace("segment_final", saved["source_text"])
             return True
 
         async def finalize_after_vad_pause() -> None:
@@ -509,6 +818,8 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                     has_translation = bool(transcript.translated_text.strip())
                     source_sentence_complete = ends_with_sentence_punctuation(
                         transcript.source_text
+                    ) and not is_unfinished_standalone_phrase(
+                        transcript.source_text, source_language
                     )
                     translation_sentence_complete = ends_with_sentence_punctuation(
                         transcript.translated_text
@@ -560,6 +871,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             nonlocal last_vad_diagnostic_at, pause_count
             nonlocal stop_requested_at, segments_saved_at_stop
             nonlocal stop_drain_reason
+            nonlocal speech_output_enabled
             pending_audio_frames: deque[bytes] = deque(
                 maxlen=LIVE_VAD_PREROLL_FRAMES
             )
@@ -615,12 +927,19 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                                 asyncio.get_running_loop().time()
                             )
 
-                        if was_speech_active:
+                        if provider_activity_mode in {"automatic", "hybrid"}:
+                            if not await enqueue_audio_item(audio_chunk):
+                                return
+                            if pause_detector.speech_started_now:
+                                record_trace("local_speech_start")
+                                boundary_wakeup.set()
+                        elif was_speech_active:
                             if not await enqueue_audio_item(audio_chunk):
                                 return
                         else:
                             pending_audio_frames.append(audio_chunk)
                             if pause_detector.speech_started_now:
+                                record_trace("local_speech_start")
                                 boundary_wakeup.set()
                                 if not await enqueue_audio_item(_START_UTTERANCE):
                                     return
@@ -630,13 +949,15 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                                 pending_audio_frames.clear()
 
                         if pause_detected:
+                            record_trace("local_pause")
                             pause_count += 1
                             boundary_tracker.note_pause(
                                 asyncio.get_running_loop().time()
                             )
                             boundary_wakeup.set()
-                            if not await enqueue_audio_item(_END_UTTERANCE):
-                                return
+                            if provider_activity_mode in {"manual", "hybrid"}:
+                                if not await enqueue_audio_item(_END_UTTERANCE):
+                                    return
                             await send_event({
                                 "type": "speech_pause_detected",
                                 "pause_number": pause_count,
@@ -682,10 +1003,19 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                             and command.get("type") == "stop"
                         ):
                             stop_requested_at = asyncio.get_running_loop().time()
+                            record_trace("client_stop")
                             segments_saved_at_stop = segments_saved
                             latency_tracker.note_stop(stop_requested_at)
                             stop_requested.set()
                             return
+
+                        if (
+                            isinstance(command, dict)
+                            and command.get("type") == "set_speech_output"
+                            and isinstance(command.get("enabled"), bool)
+                        ):
+                            speech_output_enabled = command["enabled"]
+                            continue
 
             except WebSocketDisconnect:
                 stop_requested_at = asyncio.get_running_loop().time()
@@ -696,14 +1026,19 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 async def flush_audio_queue() -> None:
                     # The FIFO sentinel makes the sender deliver every pending
                     # frame and activity_end before it exits. Never evict audio.
-                    for item in _final_audio_queue_items(
-                        speech_active=pause_detector.speech_active,
-                        speech_candidate=pause_detector.speech_candidate_ms > 0,
-                        pending_frames=list(pending_audio_frames),
-                        start_marker=_START_UTTERANCE,
-                        end_marker=_END_UTTERANCE,
-                        stop_marker=None,
-                    ):
+                    final_items = (
+                        [None]
+                        if provider_activity_mode in {"automatic", "hybrid"}
+                        else _final_audio_queue_items(
+                            speech_active=pause_detector.speech_active,
+                            speech_candidate=pause_detector.speech_candidate_ms > 0,
+                            pending_frames=list(pending_audio_frames),
+                            start_marker=_START_UTTERANCE,
+                            end_marker=_END_UTTERANCE,
+                            stop_marker=None,
+                        )
+                    )
+                    for item in final_items:
                         await audio_queue.put(item)
 
                 try:
@@ -721,12 +1056,16 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         sender_task.cancel()
 
         async def send_audio_to_gemini(provider_session) -> None:
-            await _forward_audio_queue(audio_queue, provider_session)
+            await _forward_audio_queue(
+                audio_queue, provider_session, on_marker=record_trace,
+                activity_mode=provider_activity_mode,
+            )
 
         async def receive_gemini_events(provider_session) -> None:
             nonlocal turn_boundary_seen
             nonlocal last_provider_terminal_at
             nonlocal input_transcription_events
+            nonlocal input_interim_events
             nonlocal output_transcription_events
             nonlocal input_finished_events
             nonlocal output_finished_events
@@ -796,6 +1135,11 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         content.interim_input_transcription
                         and content.interim_input_transcription.text
                     ):
+                        record_trace(
+                            "provider_source_interim",
+                            content.interim_input_transcription.text,
+                        )
+                        input_interim_events += 1
                         note_transcript_activity()
                         latency_tracker.note_source(
                             asyncio.get_running_loop().time()
@@ -813,11 +1157,15 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                             "type": "input_partial",
                             "text": preview,
                         })
+                        record_trace("source_partial_sent", preview)
 
                     if (
                         content.input_transcription
                         and content.input_transcription.text
                     ):
+                        record_trace(
+                            "provider_source", content.input_transcription.text
+                        )
                         note_transcript_activity()
                         latency_tracker.note_source(
                             asyncio.get_running_loop().time()
@@ -825,7 +1173,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         input_transcription_events += 1
                         text = content.input_transcription.text
                         async with transcript_lock:
-                            assembled = transcript.add_source_fragment(text)
+                            assembled = transcript.add_source_fragment(
+                                text,
+                                finished=content.input_transcription.finished is True,
+                            )
                             boundary_tracker.note_transcript(
                                 asyncio.get_running_loop().time()
                             )
@@ -834,6 +1185,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                             "type": "input_partial",
                             "text": assembled,
                         })
+                        record_trace("source_partial_sent", assembled)
 
                         await finalize_segment()
 
@@ -841,6 +1193,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         content.output_transcription
                         and content.output_transcription.text
                     ):
+                        record_trace(
+                            "provider_translation",
+                            content.output_transcription.text,
+                        )
                         note_transcript_activity()
                         latency_tracker.note_translation(
                             asyncio.get_running_loop().time()
@@ -857,10 +1213,15 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                             "type": "output_partial",
                             "text": assembled,
                         })
+                        record_trace("translation_partial_sent", assembled)
 
                         await finalize_segment()
 
-                    if content.model_turn and content.model_turn.parts:
+                    if (
+                        speech_output_enabled
+                        and content.model_turn
+                        and content.model_turn.parts
+                    ):
                         import base64
 
                         for part in content.model_turn.parts:
@@ -887,9 +1248,13 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         provider_boundary_seen = True
 
                     if provider_boundary_seen:
+                        record_trace("provider_terminal")
                         note_provider_terminal()
                         turn_boundary_seen = True
-                        await finalize_segment()
+                        # A provider marker can precede late source words.
+                        # Let the local VAD boundary and transcript quiet
+                        # window decide when persistence is safe.
+                        boundary_wakeup.set()
 
                     if content.turn_complete and stop_requested.is_set():
                         return
@@ -909,6 +1274,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 LIVE_CLIENT,
                 session_context,
                 orchestrator.memory,
+                provider_activity_mode=provider_activity_mode,
             ) as (provider_session, context_restore_status):
                 provider_connect_ms = round(
                     (asyncio.get_running_loop().time() - provider_connect_started_at)
@@ -927,13 +1293,19 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         session_context.persisted_segment_count
                     ),
                     "last_sequence_number": session_context.last_sequence_number,
+                    "continuation_fragment_id": (
+                        continuation_row["segment_id"] if continuation_row else None
+                    ),
                     "provider_connect_ms": provider_connect_ms,
                     "vad": {
                         "rms_threshold": LIVE_VAD_RMS_THRESHOLD,
                         "min_speech_ms": LIVE_VAD_MIN_SPEECH_MS,
                         "silence_ms": LIVE_VAD_SILENCE_MS,
-                        "preroll_ms": LIVE_VAD_PREROLL_FRAMES * 100,
-                        "provider_activity_mode": "manual",
+                        "preroll_ms": (
+                            LIVE_VAD_PREROLL_FRAMES * 100
+                            if provider_activity_mode == "manual" else 0
+                        ),
+                        "provider_activity_mode": provider_activity_mode,
                     },
                 })
                 try:
@@ -952,6 +1324,7 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                 sender_task = asyncio.create_task(
                     send_audio_to_gemini(provider_session)
                 )
+                record_trace("connection_ready")
                 provider_task = asyncio.create_task(
                     receive_gemini_events(provider_session)
                 )
@@ -1135,8 +1508,18 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
                         logger.exception("Live translation task failed.")
 
         # Save any remaining text when the user stops or the provider closes.
-        # If translation text is missing, save the source as a failed segment.
+        # A clean Stop may yield a spoken fragment; a provider failure remains
+        # retryable as failed. Both preserve the source transcript.
         await finalize_segment(force=True)
+
+        try:
+            await asyncio.to_thread(
+                latency_metrics.record_stream_trace,
+                session_id,
+                list(event_trace),
+            )
+        except Exception:
+            logger.exception("Could not save live event trace for session %s.", session_id)
 
         if (
             stop_requested_at is not None
@@ -1165,7 +1548,9 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             "type": "stream_stopped",
             "session_id": session_id,
             "segments_saved": segments_saved,
+            "fragments_saved": fragments_saved,
             "translation_repairs": translation_repairs,
+            "stop_source_confirmations": stop_source_confirmations,
             "stop_drain_reason": stop_drain_reason,
             "stop_drain_elapsed_ms": stop_drain_elapsed_ms,
             "latency_samples_ms": latency_samples,
@@ -1176,6 +1561,10 @@ async def live_session_websocket(websocket: WebSocket, session_id: str):
             "segment_settle_ms": LIVE_SEGMENT_SETTLE_MS,
             "pauses_detected": pause_count,
             "input_transcription_events": input_transcription_events,
+            "input_interim_events": input_interim_events,
+            "source_preview_tail_preservations": (
+                transcript.source_preview_tail_preservations
+            ),
             "output_transcription_events": output_transcription_events,
             "input_finished_events": input_finished_events,
             "output_finished_events": output_finished_events,

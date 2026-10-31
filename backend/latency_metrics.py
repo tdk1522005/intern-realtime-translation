@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
@@ -115,6 +116,49 @@ def record_samples(session_id: str, samples: dict[str, float]) -> int:
             ],
         )
     return len(accepted)
+
+
+def record_stream_trace(session_id: str, events: list[dict]) -> str:
+    """Persist a bounded event timeline without audio or full transcripts."""
+    trace_id = str(uuid4())
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO live_stream_traces (
+                trace_id, session_id, events_json, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                trace_id,
+                session_id,
+                json.dumps(events[-200:], ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+    return trace_id
+
+
+def read_latest_stream_trace(session_id: str) -> dict | None:
+    """Return the latest completed connection's event order for diagnosis."""
+    with database.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT trace_id, created_at, events_json
+            FROM live_stream_traces
+            WHERE session_id = ?
+            ORDER BY created_at DESC, trace_id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "session_id": session_id,
+        "trace_id": row["trace_id"],
+        "created_at": row["created_at"],
+        "events": json.loads(row["events_json"]),
+    }
 
 
 def record_provider_connection_sample(

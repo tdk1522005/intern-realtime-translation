@@ -44,10 +44,13 @@ Trang `/live` hiện dùng endpoint này. `main.py` còn endpoint cũ `/api/v1/l
 4. Gửi một JSON start:
 
 ```json
-{"type":"start","target_language_code":"vi"}
+{"type":"start","target_language_code":"vi","continue_fragment":true,"speech_output_enabled":false}
 ```
 
 `target_language_code` là ngôn ngữ đích: `vi` nghĩa là dịch sang tiếng Việt; `en` nghĩa là dịch sang tiếng Anh. Backend xác định ngôn ngữ nguồn theo chiều ngược lại.
+`continue_fragment` là tùy chọn, mặc định `true`. Nếu segment cuối trong cùng session/cùng chiều dịch đang ở trạng thái `fragment`, lời nói mới được nối vào lời gốc cũ và cả câu được dịch lại. Gửi `false` khi người dùng muốn bắt đầu ý mới; đoạn dở cũ vẫn được giữ nguyên.
+`speech_output_enabled` là tùy chọn, mặc định `true` để tương thích client cũ. Gửi `false` nếu chỉ cần chữ: backend không chuyển các gói audio dịch lớn về client; transcript nguồn và bản dịch vẫn được gửi bình thường. Khi người dùng đổi lựa chọn trong lúc đang thu, gửi `{"type":"set_speech_output","enabled":true}` hoặc `false`.
+`provider_activity_mode` là tùy chọn, mặc định `manual` để giữ cách chạy đã kiểm thử bằng microphone. Hai giá trị thử nghiệm là `automatic` (gửi liên tục cả khung âm thanh im lặng để Gemini tự phát hiện ngắt hơi) và `hybrid` (cũng gửi âm thanh liên tục, đồng thời gửi `audio_stream_end` khi VAD backend phát hiện ngắt hơi và lúc Stop). Chỉ thay chế độ này khi mở một WebSocket mới; dùng session mới cho phép so sánh A/B rõ ràng. `session_ready.vad.provider_activity_mode` xác nhận chế độ thực tế. Hai chế độ thử nghiệm đã qua test giả lập nhưng cần đo bằng Gemini và microphone thật trước khi áp dụng mặc định cho web/app.
 
 5. Gửi audio thành **binary WebSocket frames**: PCM signed 16-bit little-endian, mono, 16 kHz. Mỗi frame tối đa 3200 byte (100 ms). Không gửi WAV header.
 6. Khi người dùng dừng, gửi JSON:
@@ -67,6 +70,8 @@ socket.onopen = () => {
   socket.send(JSON.stringify({
     type: "start",
     target_language_code: "vi",
+    continue_fragment: true,
+    speech_output_enabled: false,
   }));
 };
 
@@ -86,18 +91,28 @@ function stopLiveTranslation() {
 
 | Event | Cách client xử lý |
 |---|---|
-| `session_ready` | Backend sẵn sàng; có `session_id`, `source_language`, `target_language`, `audio_format`, thông số VAD, `context_restore_status`, `context_restored`, số segment lịch sử, sequence cuối và thời gian mở provider. |
+| `session_ready` | Backend sẵn sàng; có `session_id`, `source_language`, `target_language`, `audio_format`, thông số VAD, `context_restore_status`, `context_restored`, số segment lịch sử, sequence cuối, `continuation_fragment_id` (nếu đang nối đoạn dở) và thời gian mở provider. |
 | `input_partial` | Transcript nguồn đang cập nhật. Thay nội dung preview bằng `text`; không nối snapshot vào cuối. |
 | `output_partial` | Bản dịch đang cập nhật. Cũng thay preview bằng `text`. |
-| `segment_final` | Segment đã lưu; có `segment_id`, `sequence_number`, `source_text`, `source_language`, `en`, `vn`, `status`, `created_at`. Đây là bản ghi cuối. |
-| `translated_audio` | Chunk audio dịch dạng base64, có `mime_type`; chỉ phát nếu sản phẩm bật chức năng audio. |
+| `segment_final` | Segment đã lưu/cập nhật; có `segment_id`, `sequence_number`, `source_text`, `source_language`, `en`, `vn`, `status`, `created_at`. Khi nối tiếp đoạn dở, event mới dùng lại `segment_id` cũ và thay nội dung. Field `source_confirmed_without_punctuation` được giữ để tương thích; chính sách hiện tại không tự chốt source thiếu dấu câu. |
+| `translated_audio` | Chunk audio dịch dạng base64, có `mime_type`; backend chỉ gửi khi `speech_output_enabled=true`. |
 | `speech_pause_detected`, `vad_diagnostic` | Thông tin chẩn đoán VAD; có thể bỏ qua trong giao diện sản phẩm. |
 | `stop_draining` | Backend đang xả frame cuối và đợi transcript/bản dịch; chưa báo hoàn tất. |
-| `stream_stopped` | Luồng đã dừng; có số segment lưu được và số liệu drain. Session trong database vẫn `active` để có thể nối lại hoặc kết thúc sau. |
+| `stream_stopped` | Luồng đã dừng; có số segment lưu được, `fragments_saved`, `stop_source_confirmations` và số liệu drain. Session trong database vẫn `active` để có thể nối lại hoặc kết thúc sau. |
 | `provider_go_away` | Gemini báo provider connection sắp đóng. Dừng gửi audio lên socket hiện tại; có thể mở lại WebSocket với cùng `session_id` và ngôn ngữ đích để backend thử resume. |
 | `error` | Có `message` mô tả lỗi. Nếu socket đóng, tải transcript REST lại để đồng bộ trạng thái. |
 
 Partial là preview có thể thay đổi; chỉ `segment_final` là dữ liệu chuẩn. Nếu gặp lại cùng `segment_id`, cập nhật bản ghi đó thay vì thêm hàng mới. Sắp xếp theo `sequence_number`, không dựa vào thứ tự event đến UI.
+`segment_final.status="failed"` nghĩa là bản ghi đã lưu để chẩn đoán/xử lý tiếp, **không** có nghĩa bản dịch trong `en`/`vn` đáng tin hoặc được phép xem là kết quả cuối. Web/app nên gắn nhãn chưa hoàn chỉnh và chỉ đưa segment `completed` vào phần hiển thị bản dịch đã chốt.
+
+`segment_final.status="fragment"` nghĩa là người dùng chủ động Stop sạch khi lời nói vẫn dở. Backend giữ nguyên `source_text` và field ngôn ngữ gốc; field đích chứa bản dịch **tạm** nếu Gemini đã trả về, hoặc `null` nếu chưa có chữ dịch nào. Ví dụ `source_text="Xin"`, `vn="Xin"`, `en="Thank you."` vẫn có thể xảy ra, nhưng `en` chỉ là dự đoán và có thể sai. Client phải gắn nhãn “tạm/đang nói dở”, không coi đây là bản dịch cuối. `fragment` không phải lỗi provider nên không gọi retry; nó không chặn kết thúc session/presentation. `failed` vẫn dành cho lỗi/mất bản dịch và chặn finish cho đến khi được xử lý.
+
+Vì Gemini có thể trả 1–2 từ cuối sau khoảng nghỉ, source **không có dấu kết câu** khi Stop sạch luôn được giữ là `fragment`, kể cả khi bản dịch tạm có vẻ hợp lý. Ví dụ `Cảm ơn bạn vì đã đến tham dự` có thể được nói tiếp bằng `buổi tiệc...`; đánh dấu `completed` ngay sẽ khiến từ tiếp theo rơi vào segment khác. Đây là chính sách giữ dữ liệu để nối tiếp, không phải khẳng định mọi câu thiếu dấu chấm đều sai.
+
+Trong cùng luồng đang nói, backend giữ mảnh dở để chờ tiếng nói kế tiếp. Nếu đã Stop, kết nối lại cùng session/chiều dịch với `continue_fragment=true` sẽ lấy segment `fragment` cuối và nối lời gốc mới vào đó. Khi câu ghép đủ hoàn chỉnh, backend dịch lại **toàn bộ** qua text Gemini rồi cập nhật chính `segment_id` cũ; client cần upsert theo ID. Nếu lời mới vẫn dở, segment ấy tiếp tục là `fragment`. Đổi chiều dịch hoặc gửi `continue_fragment=false` sẽ bắt đầu segment khác. Không tự xóa từ lặp: nếu người dùng nói “Xin” hai lần, transcript giữ cả hai. Một số câu dở có dấu chấm do ASR thêm vẫn có thể bị coi là hoàn chỉnh; quy tắc hiện nhận diện rõ các trường hợp như `Xin.` / `Please.`.
+
+Để giảm việc chốt trước khi Gemini trả 1–2 từ cuối, mặc định backend chờ transcript yên 2500 ms sau ngắt hơi và 2500 ms lúc Stop. Preview trên WebSocket vẫn hiển thị ngay; thời gian chờ chỉ ảnh hưởng việc ghi segment cuối. Có thể đổi `LIVE_SEGMENT_SETTLE_MS` và `LIVE_STOP_QUIET_MS` trong cấu hình. Không có dấu mốc transcript cuối đáng tin từ model thì không thể bảo đảm 100% rằng từ đến sau cửa sổ chờ sẽ được gán đúng câu; cần kiểm tra bằng microphone thật và bộ audio chuẩn.
+
 
 Khi reconnect cùng session và cùng chiều dịch, backend thử dùng Gemini resumption handle mới nhất. `session_ready.context_restored` cho biết provider context có thực sự được khôi phục hay không; các bản ghi transcript vẫn được lưu dù provider phải mở stream mới. Client chỉ gửi audio mới sau reconnect, không gửi lại các frame đã gửi trước đó. Binary audio hiện chưa mang frame ID nên backend không thể phân biệt audio replay với lời nói được lặp lại có chủ ý. Backend giữ `segment_id` đang chờ ghi qua reconnect và việc lưu segment/advance ID là idempotent trong SQLite. Nếu session đang có một WebSocket khác, kết nối thứ hai nhận event `error` và close code 1013.
 
@@ -119,6 +134,10 @@ Khi reconnect cùng session và cùng chiều dịch, backend thử dùng Gemini
 | Summary input theo session | `GET /api/v1/sessions/{session_id}/summary-input` |
 | Summary input toàn presentation | `GET /api/v1/presentations/{presentation_id}/summary-input` |
 | Metrics live và reconnect | `GET /api/v1/metrics/live-latency` |
+| Xem thứ tự sự kiện Live để tìm lỗi chậm chữ | `GET /api/v1/sessions/{session_id}/live-diagnostics` |
+
+`live-diagnostics` chỉ phục vụ kiểm tra core: trả tối đa 200 mốc của kết nối Live đã dừng gần nhất, tính bằng mili giây từ lúc mở kết nối. Các mốc gồm VAD bắt đầu/ngắt hơi, marker gửi tới Gemini, mảnh chữ Gemini trả, chữ backend gửi cho client, Stop và lưu segment. Không lưu âm thanh; `text_tail` chỉ giữ tối đa 80 ký tự cuối của mảnh chữ. Nếu chưa có kết nối nào dừng sau khi tính năng này được thêm, endpoint trả `404`.
+Để xác định chữ cuối đến chậm do đâu, so mốc `local_pause`, `provider_activity_end` hoặc `provider_audio_stream_end`, `provider_source`/`provider_translation`, rồi `source_partial_sent`/`translation_partial_sent`. Nếu hai mốc cuối trùng thời gian, backend đã đẩy chữ ngay khi nhận từ Gemini. Ở chế độ `automatic`, chỉ có `provider_audio_stream_end` khi Stop; ở `hybrid`, có thêm mốc này mỗi lần VAD chốt khoảng nghỉ.
 
 Tạo segment văn bản dùng body:
 
@@ -143,7 +162,7 @@ POST /api/v1/presentations/{presentation_id}/finish
 GET  /api/v1/presentations/{presentation_id}/summary-input
 ```
 
-Finish trả `409` nếu còn segment lỗi/đang chờ, thiếu sequence, session chưa kết thúc hoặc presentation chưa sẵn sàng. Summary-input chỉ xuất khi presentation đã `finished` và các segment có đủ bản dịch. Endpoint tổng hợp dữ liệu; việc gọi T5 và tạo summary thuộc thành viên T5.
+Finish trả `409` nếu còn segment lỗi/đang chờ, thiếu sequence, session chưa kết thúc hoặc presentation chưa sẵn sàng. Segment `fragment` vẫn được tính vào số segment và transcript nguồn có thứ tự. Trong summary-input, mỗi segment có `status`; với `fragment`, field đích có thể chứa bản dịch tạm, nhưng `transcript_en`/`transcript_vn` tổng hợp chỉ ghép bản dịch của segment `completed` và lời gốc của fragment. Bên T5 có thể đọc danh sách `segments` để biết đoạn nào chưa có bản dịch cuối; endpoint này chỉ tổng hợp dữ liệu, không chạy T5.
 
 Response presentation summary có dạng:
 
@@ -169,7 +188,8 @@ Response presentation summary có dạng:
           "source_text": "The meeting starts at nine.",
           "source_language": "en",
           "en": "The meeting starts at nine.",
-          "vn": "Cuộc họp bắt đầu lúc chín giờ."
+          "vn": "Cuộc họp bắt đầu lúc chín giờ.",
+          "status": "completed"
         }
       ]
     }
