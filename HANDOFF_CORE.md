@@ -1,6 +1,6 @@
 # Bàn giao core dịch giọng nói cho web, app và T5
 
-**Trạng thái:** backend đủ để các thành viên bắt đầu tích hợp và thử nghiệm. Chưa có cam kết độ trễ/chất lượng cho mọi giọng nói hoặc môi trường mạng. Nhánh bàn giao: `codex/multi-agent-core` của repo `tdk1522005/intern-realtime-translation`.
+**Trạng thái:** backend đủ để các thành viên bắt đầu tích hợp và thử nghiệm. Chưa có cam kết độ trễ/chất lượng cho mọi giọng nói hoặc môi trường mạng. Bản tích hợp nằm trên nhánh mặc định `main`; nhánh phát triển `codex/multi-agent-core` cùng commit. Repo: `tdk1522005/intern-realtime-translation`.
 
 ## Mỗi người nhận gì?
 

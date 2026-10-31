@@ -2,7 +2,7 @@
 
 > Tài liệu bàn giao để tiếp tục công việc ở các cuộc trò chuyện sau. Đọc file này trước khi đề xuất hoặc sửa code. Cập nhật mục **Trạng thái hiện tại** và **Việc tiếp theo** sau mỗi mốc có bằng chứng.
 >
-> Cập nhật lần cuối: 2026-11-01 (Asia/Saigon). Nhánh phát triển core mới nhất: `codex/multi-agent-core`.
+> Cập nhật lần cuối: 2026-11-01 (Asia/Saigon). Bản tích hợp core nằm trên `main` và `codex/multi-agent-core`; tag `core-handoff-2026-11-01` là mốc trước đợt dọn thư mục.
 
 ## 1. Mục tiêu đồ án
 
@@ -24,7 +24,7 @@ Yêu cầu kỹ thuật cốt lõi của phần **TDKha** là xử lý luồng A
 ### Đã có trong source hiện tại
 
 - FastAPI app trong `backend/main.py`.
-- Có `backend/README.md` làm mục lục file/lệnh chạy; các bản `live.html` cũ được giữ trong `backend/archive/`, không thay đổi module runtime để sắp xếp thư mục.
+- Có `README.md` ở thư mục gốc hướng dẫn từng thành viên và `backend/README.md` làm mục lục file/lệnh chạy. Bản `live.html` cũ nằm trong lịch sử Git; không thay đổi module runtime khi dọn thư mục.
 - REST dịch văn bản `/api/v1/translate`, có trả song ngữ `en` và `vn`.
 - SQLite trong `backend/database.py`, có bảng presentation, session và segment; có khóa duy nhất để tránh trùng segment/sequence.
 - REST lifecycle: tạo presentation/session, nhận và dịch segment văn bản, retry segment lỗi, liệt kê segment, lấy trạng thái/transcript, xuất dữ liệu summary theo session hoặc toàn presentation, kết thúc session và presentation.
@@ -205,6 +205,8 @@ Chỉ ghi tên biến/model, **không ghi API key hoặc giá trị bí mật**.
 24. Người dùng đã thử micro thật và Dừng trong session hybrid `8051d1bc-9490-4106-ac38-c108c83c801c`. `GET transcript` xác nhận 1 segment `completed`, source `Hôm nay tôi muốn trình bày về bài báo cáo này.`, target `Today I would like to present this report.`, không có failed/pending. Trace: local speech start 688 ms, pause + `audio_stream_end` 1875 ms, speech start lại 2219 ms; Gemini source partial đầu `Hôm nay tôi muốn trình bày về` ở 5078 ms, translation partial đầu 5203 ms; pause + `audio_stream_end` thứ hai 6063 ms; source thêm `bài báo cáo` ở 6094 ms và `này.` ở 7016 ms; Stop 10844 ms. Backend gửi mỗi source partial trong cùng mili giây nhận từ Gemini. Đuôi `này.` tới 953 ms sau khoảng nghỉ thứ hai và 3828 ms trước Stop; trace không có speech start mới sau khoảng nghỉ thứ hai, nên lỗi phải nói câu tiếp theo mới hiện đuôi không tái hiện trong lượt này. Tuy nhiên partial đầu vẫn đến hơn 3 giây sau khoảng nghỉ đầu; VAD tách câu thành hai quãng nói. Một lượt chưa đủ kết luận hybrid luôn nhanh hơn manual, cũng chưa chứng minh ngưỡng VAD phù hợp nhiều giọng/thiết bị. Chế độ manual vẫn mặc định; chưa push thay đổi.
 
 25. Ngày 2026-11-01 đã bàn giao bản core cho nhóm trên nhánh GitHub `codex/multi-agent-core`, commit `cfd0739`, tag checkpoint `core-handoff-2026-11-01`; 88/88 test offline đạt và file `.env`/database/venv không vào Git. `HANDOFF_CORE.md` là trang gửi cho Thiện, Linh và Thắng. Bản này đủ để tích hợp API hiện có. Rà lại yêu cầu ban đầu sau khi push cho thấy hai phần core chưa hoàn tất: (a) dịch lại toàn bộ transcript sau khi finish, vì summary-input hiện chỉ ghép bản dịch theo segment; (b) API liệt kê/tìm kiếm các presentation/session cũ, vì hiện chỉ đọc được khi có ID. Ngoài ra Gemini resume thật và chất lượng/độ trễ qua nhiều giọng, ngắt hơi chưa được chứng minh đủ. Phân biệt mốc bàn giao tích hợp với mức hoàn thành toàn bộ tiêu chí đồ án.
+
+26. Ngày 2026-11-01, theo yêu cầu đóng gói gọn để bàn giao, đã thêm `README.md` ở thư mục gốc, cập nhật `HANDOFF_CORE.md`, dọn hai bản HTML cũ trong `backend/archive/` và script sửa encoding dùng một lần `backend/fix_live_html_encoding.py` khỏi bản hiện tại. Các file này vẫn lấy lại được từ lịch sử Git/tag checkpoint. `.env`, `.venv/`, `translation.db` và `tests/` được giữ; module runtime không di chuyển. Sau khi kiểm thử 88/88, nhánh `main` được fast-forward đến cùng commit với `codex/multi-agent-core` để thành viên clone mặc định thấy bản tích hợp mới.
 
 ## 10. Archify đã cài và sơ đồ kiến trúc
 

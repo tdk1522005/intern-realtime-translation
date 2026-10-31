@@ -37,8 +37,7 @@ Mở Swagger tại `http://127.0.0.1:8000/docs`. Cách cài lại dependencies v
 - `requirements.txt`: dependencies Python của backend.
 - `.env.example`: mẫu cấu hình không chứa API key thật.
 - `tests/`: test backend và fixture. Chạy bằng `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`.
-- `archive/`: bản lưu các phiên bản `live.html` cũ; không được backend import khi chạy.
-- `fix_live_html_encoding.py`: script sửa encoding dùng thủ công một lần; không cần chạy khi khởi động hoặc kiểm tra backend.
+- `__pycache__/`: cache Python tự tạo, được Git bỏ qua.
 
 ## File local — không gửi hoặc xóa khi dọn code
 
