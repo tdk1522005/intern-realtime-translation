@@ -46,13 +46,15 @@ Sau hai bước finish ở trên, gọi:
 GET /api/v1/presentations/{presentation_id}/summary-input
 ```
 
-Response có `transcript_en`, `transcript_vn`, và `sessions[]` chứa các `segments[]` có thứ tự. Chọn **một** transcript ngôn ngữ cho một lần tóm tắt để tránh lặp nội dung hai lần. Với `fragment`, bản dịch tạm có thể nằm trong `segments[]` nhưng không được ghép vào chuỗi transcript tổng hợp ở ngôn ngữ đích. Backend không gọi T5 và không tạo kết quả tóm tắt.
+Response có `transcript_en`, `transcript_vn`, và `sessions[]` chứa các `segments[]` có thứ tự. Chọn **một** transcript ngôn ngữ cho một lần tóm tắt để tránh lặp nội dung hai lần. Với `fragment`, bản dịch tạm có thể nằm trong `segments[]` nhưng không được ghép vào chuỗi transcript tổng hợp ở ngôn ngữ đích. Các chuỗi `transcript_en`/`transcript_vn` hiện **ghép bản dịch của từng segment**; backend chưa có bước gọi Gemini dịch lại toàn bộ cuộc trình bày sau khi finish. Backend không gọi T5 và không tạo kết quả tóm tắt.
 
 ## Bằng chứng và giới hạn tại thời điểm bàn giao
 
 - 88/88 test backend offline đạt; có test WebSocket giả lập cho VAD, Stop, transcript, fragment, retry, reconnect và summary input. Một smoke test kết nối Gemini thật bằng âm thanh tổng hợp đã xác nhận chế độ `hybrid` được chấp nhận; đây không phải phép đo chất lượng nhận giọng nói.
 - Một lượt microphone thật ở chế độ `hybrid` lưu đủ câu và bản dịch; đuôi câu tới trước Stop. Partial đầu vẫn có thể chậm. Vì vậy `manual` vẫn là mặc định, `hybrid` là tùy chọn đánh giá thêm.
 - P50/p95 có endpoint nhưng số mẫu thật còn ít, chưa đủ làm cam kết hiệu năng. Gemini có thể trả transcript muộn hoặc sửa partial; Web/app phải coi partial là thay đổi được.
+- Transcript được lưu và đọc theo `session_id`; chưa có API liệt kê/tìm kiếm tất cả presentation hoặc session cũ cho màn hình lịch sử. Web/app cần thống nhất contract này với người làm core trước khi xây màn hình lịch sử.
+- Bản bàn giao chưa có bước dịch lại **toàn bộ phiên** sau khi kết thúc. Nếu đây là tiêu chí bắt buộc của đồ án, người làm core sẽ bổ sung đầu ra hậu xử lý riêng để T5 có thể dùng mà không thay đổi transcript live đã lưu.
 - Khóa chống hai WebSocket cùng session hiện chỉ trong một process backend. Trước khi chạy nhiều Uvicorn worker hoặc triển khai công khai, core cần khóa chia sẻ, xác thực và cấu hình HTTPS/WSS thích hợp.
 
 Lệnh kiểm tra trước khi tích hợp: `cd backend; .\.venv\Scripts\python.exe -m unittest discover -s tests -v`.
