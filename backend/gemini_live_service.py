@@ -14,7 +14,10 @@ from google.genai import types
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_NAME = "gemini-3.5-live-translate-preview"
+MODEL_NAME = os.getenv(
+    "GEMINI_LIVE_MODEL",
+    "gemini-3.5-live-translate-preview",
+)
 
 if not API_KEY:
     raise RuntimeError("GEMINI_API_KEY is not configured.")

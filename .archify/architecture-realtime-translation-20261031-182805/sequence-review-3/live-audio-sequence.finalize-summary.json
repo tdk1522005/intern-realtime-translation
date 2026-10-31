@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\live-audio-sequence.candidate.json",
+    "sha256": "6a80b08303be030f4a52dd098a715c23b7709844b02aa8dfa2e12179e2d45fdb",
+    "bytes": 8121
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\live-audio-sequence.html",
+    "sha256": "5f8323d2b123edd28780c6ec1b79c56d31dfeec6744744ef9fc60338d230e36b",
+    "bytes": 841752
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\sequence-review-3\\live-audio-sequence.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\sequence-review-3\\live-audio-sequence.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\sequence-review-3\\live-audio-sequence.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4514,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

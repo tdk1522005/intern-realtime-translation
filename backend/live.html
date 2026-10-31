@@ -22,6 +22,7 @@
     #translated { color: #075e3c; }
     #error { color: #b42318; white-space: pre-wrap; }
     .hint { color: #667085; font-size: .92rem; }
+    #vadStatus { margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -42,6 +43,7 @@
     <button id="stop" disabled>Dừng</button>
     <span id="status">Chưa kết nối</span>
   </div>
+  <div id="vadStatus" class="hint" aria-live="polite">Chẩn đoán khoảng nghỉ: chưa bắt đầu.</div>
 
   <div class="card">
     <div class="label">Lời nói được nhận dạng</div>
@@ -62,6 +64,7 @@
     const sourceEl = document.getElementById('source');
     const translatedEl = document.getElementById('translated');
     const errorEl = document.getElementById('error');
+    const vadStatusEl = document.getElementById('vadStatus');
 
     let socket;
     let audioContext;
@@ -71,6 +74,8 @@
     let muteGain;
     let sourceBuffer = '';
     let translatedBuffer = '';
+    let sourcePreview = '';
+    let translatedPreview = '';
     let pcmBuffer = [];
     let nextPlaybackTime = 0;
     let stopFallbackTimer;
@@ -86,11 +91,48 @@
       if (!text) return;
       if (which === 'source') {
         sourceBuffer += text;
-        sourceEl.textContent = sourceBuffer;
       } else {
         translatedBuffer += text;
-        translatedEl.textContent = translatedBuffer;
       }
+      renderTranscript();
+    }
+
+    function transcriptTokens(text) {
+      return (text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+    }
+
+    function isLongTokenPrefix(prefixTokens, valueTokens) {
+      return prefixTokens.length >= 4 &&
+        prefixTokens.length <= valueTokens.length &&
+        prefixTokens.every((token, index) => token === valueTokens[index]);
+    }
+
+    function mergeDisplayedTranscript(base, snapshot) {
+      if (!base) return snapshot;
+      if (!snapshot) return base;
+      const baseTokens = transcriptTokens(base);
+      const snapshotTokens = transcriptTokens(snapshot);
+      if (isLongTokenPrefix(baseTokens, snapshotTokens)) return snapshot;
+      if (isLongTokenPrefix(snapshotTokens, baseTokens)) return base;
+      return `${base}\n${snapshot}`;
+    }
+
+    function renderTranscript() {
+      sourceEl.textContent = mergeDisplayedTranscript(sourceBuffer, sourcePreview);
+      translatedEl.textContent = mergeDisplayedTranscript(translatedBuffer, translatedPreview);
+    }
+
+    function commitSegment(message) {
+      if (message.source_text) {
+        sourceBuffer += `${sourceBuffer ? '\n' : ''}${message.source_text}`;
+      }
+      const translatedText = message.source_language === 'en' ? message.vn : message.en;
+      if (translatedText) {
+        translatedBuffer += `${translatedBuffer ? '\n' : ''}${translatedText}`;
+      }
+      sourcePreview = '';
+      translatedPreview = '';
+      renderTranscript();
     }
 
     function sendPcmChunk(samples) {
@@ -150,16 +192,70 @@
     function handleServerMessage(event) {
       if (event.target !== socket) return;
       const message = JSON.parse(event.data);
+      if (message.type === 'input_partial') {
+        sourcePreview = message.text || '';
+        renderTranscript();
+      }
+      if (message.type === 'output_partial') {
+        translatedPreview = message.text || '';
+        renderTranscript();
+      }
       if (message.type === 'input_transcription') appendText('source', message.text);
       if (message.type === 'output_transcription') appendText('translated', message.text);
+      if (message.type === 'segment_final') commitSegment(message);
       if (message.type === 'translated_audio') playPcmBase64(message.data);
+      if (message.type === 'vad_diagnostic') {
+        const speaking = message.speech_active
+          ? 'đang phát hiện tiếng nói'
+          : message.speech_candidate_ms > 0
+            ? 'đang xác nhận tiếng nói'
+            : 'đang chờ tiếng nói';
+        vadStatusEl.textContent =
+          `Khoảng nghỉ: ${speaking}; RMS ${message.rms} / ngưỡng ${message.threshold}; ` +
+          `im lặng ${message.silence_progress_ms}/${message.required_silence_ms} ms.`;
+      }
+      if (message.type === 'speech_pause_detected') {
+        vadStatusEl.textContent =
+          `Đã phát hiện khoảng nghỉ #${message.pause_number} (${message.silence_ms} ms); ` +
+          'đang chờ transcript ổn định để lưu segment.';
+      }
+      if (message.type === 'segment_final') {
+        vadStatusEl.textContent = message.translation_recovered
+          ? `Đã lưu segment #${message.sequence_number}; đã hoàn chỉnh bản dịch sau khi dừng.`
+          : `Đã lưu segment #${message.sequence_number} (${message.status}).`;
+      }
+      if (message.type === 'stop_draining') {
+        statusEl.textContent = 'Đang chờ xử lý phần cuối…';
+        vadStatusEl.textContent = message.message || 'Đang chờ transcript cuối.';
+      }
       if (message.type === 'error') {
         errorEl.textContent = message.message;
         statusEl.textContent = 'Đã dừng';
       }
       if (message.type === 'session_complete' || message.type === 'stream_stopped') {
         clearTimeout(stopFallbackTimer);
+        sourcePreview = '';
+        translatedPreview = '';
+        renderTranscript();
         statusEl.textContent = 'Đã dừng';
+        if (message.type === 'stream_stopped') {
+          vadStatusEl.textContent =
+            `Đã dừng: phát hiện ${message.pauses_detected} khoảng nghỉ; ` +
+            `VAD chốt ${message.vad_finalized_segments} segment, ` +
+            `gộp ${message.vad_merged_pauses} khoảng nghỉ; ` +
+            `chờ transcript yên ${message.segment_settle_ms} ms; ` +
+            `Gemini hoàn tất phát sinh ${message.provider_generation_completions} lần, ` +
+            `kết thúc ${message.provider_turn_completions} lượt; ` +
+            `bản dịch báo xong ${message.output_finished_events} lần; ` +
+            `có mốc thời gian ${message.input_timing_events}/${message.output_timing_events} lần; ` +
+            `nhận ${message.input_transcription_events} mảnh tiếng gốc, ` +
+            `${message.output_transcription_events} mảnh bản dịch; ` +
+            `thay snapshot lũy tiến ${message.source_snapshot_replacements} lần, ` +
+            `bỏ snapshot cũ ${message.stale_source_snapshots_ignored} lần; ` +
+            `chờ cuối ${message.stop_drain_elapsed_ms} ms (${message.stop_drain_reason}); ` +
+            `hoàn chỉnh lại ${message.translation_repairs} bản dịch; ` +
+            `đã lưu ${message.segments_saved} segment.`;
+        }
         const finishedSocket = socket;
         socket = null;
         cleanupAudio();
@@ -189,15 +285,35 @@
       const sessionId = new URLSearchParams(location.search).get('session_id');
       if (!sessionId) { errorEl.textContent = 'Mở trang với ?session_id=...'; return; }
       errorEl.textContent = '';
-      sourceBuffer = '';
-      translatedBuffer = '';
-      sourceEl.textContent = '';
-      translatedEl.textContent = '';
+      vadStatusEl.textContent = 'Đang đo âm thanh microphone…';
+      sourcePreview = '';
+      translatedPreview = '';
       nextPlaybackTime = 0;
       setRunning(true);
-      statusEl.textContent = 'Đang xin quyền microphone…';
+      statusEl.textContent = 'Đang tải lại transcript đã lưu…';
 
       try {
+        const transcriptResponse = await fetch(
+          `/api/v1/sessions/${encodeURIComponent(sessionId)}/transcript`
+        );
+        if (!transcriptResponse.ok) {
+          throw new Error('Không tải được transcript đã lưu cho phiên này.');
+        }
+        const transcript = await transcriptResponse.json();
+        const savedSegments = transcript.segments || [];
+        sourceBuffer = savedSegments
+          .map((segment) => segment.source_text || '')
+          .filter(Boolean)
+          .join('\n');
+        translatedBuffer = savedSegments
+          .map((segment) => segment.source_language === 'en' ? segment.vn : segment.en)
+          .filter(Boolean)
+          .join('\n');
+        renderTranscript();
+        vadStatusEl.textContent =
+          `Đã khôi phục ${savedSegments.length} segment đã lưu; ` +
+          'đang xin quyền microphone…';
+
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
         });
@@ -265,7 +381,7 @@
           cleanupAudio();
           setRunning(false);
           stoppingSocket.close(1000, 'Stop timeout');
-        }, 15000);
+        }, 90000);
       } else {
         if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
         socket = null;

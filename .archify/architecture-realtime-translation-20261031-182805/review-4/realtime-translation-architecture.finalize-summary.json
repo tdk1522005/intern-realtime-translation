@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+    "sha256": "f1b8c9d7428878cee6a172cc0c97a7b04bcbda6850dc50356e51ed86e92a04d8",
+    "bytes": 9236
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.html",
+    "sha256": "498e75554195ed9dea56db24c8d20f4f2082999a080e6e7bc2e3895e13fe1c83",
+    "bytes": 850434
+  },
+  "gates": {
+    "validate": "fail",
+    "deliver": "not-run",
+    "check": "not-run",
+    "browser-check": "not-run"
+  },
+  "failedStage": "validate",
+  "diagnostics": [
+    {
+      "code": "schema/maxItems",
+      "severity": "error",
+      "message": "/components/1/sources (id/label: \"fastapi\") must NOT have more than 3 items",
+      "subject": {
+        "diagramType": "architecture",
+        "path": "/components/1/sources",
+        "identity": "fastapi"
+      },
+      "evidence": {
+        "keyword": "maxItems",
+        "limit": 3
+      },
+      "supportedFixes": [
+        "provide at most 3 item(s)"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\review-4\\realtime-translation-architecture.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\review-4\\realtime-translation-architecture.finalize-summary.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 568,
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "nextAction": {
+    "action": "edit-in-place",
+    "candidate": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+    "constraint": "Preserve unaffected semantics and geometry; apply each diagnostic's supportedFixes, or the fix its message names, and do not replace the whole candidate.",
+    "then": "finalize-once"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "1a1c624b-0784-4c7d-af12-621eec591272",
+  "status": "current",
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.candidate.json",
+  "output": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.html",
+  "specification": {
+    "sha256": "3127968072a949e5f06aac2e7b035a196ace5eb50f6c3346fed9492becf628a5",
+    "bytes": 4033
+  },
+  "artifact": {
+    "sha256": "be66633bb92a8910906649ff4e899b2be0aacf2e471c44b060d8cf2af185ebae",
+    "bytes": 829798
+  }
+}

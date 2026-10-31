@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "lifecycle",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.candidate.json",
+    "sha256": "7a589d183235ffce18344bea7b19fd9d353b71ef3882054b4acbf70a32465eb3",
+    "bytes": 3892
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.html",
+    "sha256": "4706554f40785408a2df70d89d42add558518b0d205bd73a1847b6d13d65c707",
+    "bytes": 829798
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\segment-retry-lifecycle.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4034,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

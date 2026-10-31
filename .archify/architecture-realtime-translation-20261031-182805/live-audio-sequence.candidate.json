@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Luồng audio realtime: từ microphone đến segment",
+    "output": ".archify/architecture-realtime-translation-20261031-182805/live-audio-sequence.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/tdk1522005/intern-realtime-translation.git",
+      "revision": "604d631c0b179e575ed3053bc491a8c282219c32",
+      "link_mode": "local-only"
+    }
+  },
+  "participants": [
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "Trang /live",
+      "sublabel": "microphone",
+      "sources": [
+        {
+          "path": "backend/live.html",
+          "line": 138,
+          "end_line": 163,
+          "label": "PCM16 16 kHz"
+        },
+        {
+          "path": "backend/live.html",
+          "line": 284,
+          "end_line": 340,
+          "label": "Start + WebSocket"
+        },
+        {
+          "path": "backend/live.html",
+          "line": 369,
+          "end_line": 390,
+          "label": "Stop flush"
+        }
+      ]
+    },
+    {
+      "id": "ws",
+      "type": "backend",
+      "label": "FastAPI live",
+      "sublabel": "WebSocket · VAD · Stop",
+      "sources": [
+        {
+          "path": "backend/live_session_router.py",
+          "line": 383,
+          "end_line": 448,
+          "label": "Route + validation"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 657,
+          "end_line": 762,
+          "label": "Audio ingress + VAD"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 1062,
+          "end_line": 1209,
+          "label": "Stop drain + persist"
+        }
+      ]
+    },
+    {
+      "id": "live",
+      "type": "external",
+      "label": "Gemini Live",
+      "sublabel": "audio stream",
+      "sources": [
+        {
+          "path": "backend/live_session_router.py",
+          "line": 331,
+          "end_line": 347,
+          "label": "Live config"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 824,
+          "end_line": 966,
+          "label": "Transcript events"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 980,
+          "end_line": 1007,
+          "label": "Connect"
+        }
+      ]
+    },
+    {
+      "id": "text",
+      "type": "external",
+      "label": "Gemini text",
+      "sublabel": "full-source repair",
+      "sources": [
+        {
+          "path": "backend/gemini_service.py",
+          "line": 29,
+          "end_line": 90,
+          "label": "JSON translation"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 78,
+          "end_line": 103,
+          "label": "Repair function"
+        }
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "segment / metrics",
+      "sources": [
+        {
+          "path": "backend/database.py",
+          "line": 25,
+          "end_line": 81,
+          "label": "Tables"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 157,
+          "end_line": 289,
+          "label": "Segment insert"
+        }
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "id": "start",
+      "from": "browser",
+      "to": "ws",
+      "y": 170,
+      "label": "start(session, target)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "audio",
+      "from": "browser",
+      "to": "ws",
+      "y": 250,
+      "label": "PCM16 mono 16 kHz",
+      "variant": "emphasis",
+      "note": "Âm thanh PCM16 mono 16 kHz; Stop xả phần buffer còn lại."
+    },
+    {
+      "id": "send-live-audio",
+      "from": "ws",
+      "to": "live",
+      "y": 330,
+      "label": "ActivityStart + audio",
+      "variant": "emphasis",
+      "note": "VAD RMS đánh dấu khoảng nghỉ; FIFO giữ đúng thứ tự frame."
+    },
+    {
+      "id": "source-events",
+      "from": "live",
+      "to": "ws",
+      "y": 410,
+      "label": "source text fragments",
+      "variant": "return",
+      "note": "Interim là snapshot có thể sửa; final được thêm vào source chuẩn."
+    },
+    {
+      "id": "translation-events",
+      "from": "live",
+      "to": "ws",
+      "y": 490,
+      "label": "mảnh transcript bản dịch",
+      "variant": "return"
+    },
+    {
+      "id": "live-preview",
+      "from": "ws",
+      "to": "browser",
+      "y": 570,
+      "label": "partial updates",
+      "variant": "return",
+      "note": "Partial chỉ để xem sớm, chưa phải segment đã lưu."
+    },
+    {
+      "id": "pause-end",
+      "from": "ws",
+      "to": "live",
+      "y": 650,
+      "label": "pause → ActivityEnd",
+      "variant": "dashed",
+      "note": "Chỉ chốt khi hai bản đủ dấu câu và yên 300 ms."
+    },
+    {
+      "id": "provider-final",
+      "from": "live",
+      "to": "ws",
+      "y": 730,
+      "label": "event cuối / marker kết thúc",
+      "variant": "return"
+    },
+    {
+      "id": "stop-command",
+      "from": "browser",
+      "to": "ws",
+      "y": 810,
+      "label": "stop",
+      "variant": "emphasis",
+      "note": "Browser xả buffer PCM trước khi gửi lệnh Stop."
+    },
+    {
+      "id": "stop-audio-tail",
+      "from": "ws",
+      "to": "live",
+      "y": 890,
+      "label": "FIFO tail + ActivityEnd",
+      "variant": "emphasis",
+      "note": "Gửi phần audio còn trong FIFO trước khi đợi Gemini."
+    },
+    {
+      "id": "drain-result",
+      "from": "live",
+      "to": "ws",
+      "y": 970,
+      "label": "late transcript / translation",
+      "variant": "return"
+    },
+    {
+      "id": "repair-request",
+      "from": "ws",
+      "to": "text",
+      "y": 1050,
+      "label": "full-source repair",
+      "variant": "dashed",
+      "note": "Chỉ gọi khi source đủ nhưng bản dịch còn thiếu."
+    },
+    {
+      "id": "repair-result",
+      "from": "text",
+      "to": "ws",
+      "y": 1130,
+      "label": "JSON en/vn",
+      "variant": "return"
+    },
+    {
+      "id": "save-final",
+      "from": "ws",
+      "to": "db",
+      "y": 1210,
+      "label": "lưu segment + metrics",
+      "variant": "emphasis",
+      "note": "Mỗi transcript buffer giữ một segment_id ổn định; replay cùng dữ liệu không tạo hàng mới. Nếu bản dịch thiếu, giữ source và đặt trạng thái failed."
+    },
+    {
+      "id": "stopped",
+      "from": "ws",
+      "to": "browser",
+      "y": 1290,
+      "label": "stream_stopped",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Vì sao partial không thành segment ngay",
+      "items": [
+        "Partial có thể bị model sửa; assembler giữ preview riêng và chỉ final hóa sau điều kiện boundary/settle.",
+        "VAD ở đây là endpointing theo RMS, không phải bộ phân loại ngữ âm; nó gửi mốc hoạt động chứ không cắt mất audio."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Stop giữ phần cuối",
+      "items": [
+        "Browser flush buffer; backend giữ FIFO tail, gửi ActivityEnd, rồi mới đợi provider.",
+        "Quiet window giảm chờ khi provider im lặng; hard timeout ngăn giao diện đợi vô hạn.",
+        "Nếu translation cuối thiếu, backend thử repair từ full source trước khi ghi segment."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Giới hạn của sơ đồ",
+      "items": [
+        "Đây là luồng một kết nối live; session resumption/khôi phục context model khi reconnect chưa được bật.",
+        "Số liệu p50/p95 được ghi từ sample; diagram không khẳng định đó là benchmark đủ lớn."
+      ]
+    }
+  ]
+}

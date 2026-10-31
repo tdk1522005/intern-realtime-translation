@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-31T11:58:04.306Z",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+    "sha256": "f1b8c9d7428878cee6a172cc0c97a7b04bcbda6850dc50356e51ed86e92a04d8",
+    "bytes": 9236
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.html",
+    "sha256": "498e75554195ed9dea56db24c8d20f4f2082999a080e6e7bc2e3895e13fe1c83",
+    "bytes": 850434
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.agents\\skills\\archify\\bin\\archify.mjs",
+        "deliver",
+        "architecture",
+        "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+        "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "C:\\Users\\tdkha\\.codex\\visualizations\\2026\\10\\23\\01a16a1a-a4c7-7b93-98f5-88e390d6a426\\archify-source-snapshot-20261031-182805",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "3c407a14-f265-4278-85b6-4fcc402d9dfe",
+        "stage": "render",
+        "type": "architecture",
+        "input": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+        "output": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.html",
+        "error": "architecture schema validation failed:\n  /components/1/sources (id/label: \"fastapi\") must NOT have more than 3 items {\"limit\":3}",
+        "diagnostics": [
+          {
+            "code": "schema/maxItems",
+            "severity": "error",
+            "message": "/components/1/sources (id/label: \"fastapi\") must NOT have more than 3 items",
+            "subject": {
+              "diagramType": "architecture",
+              "path": "/components/1/sources",
+              "identity": "fastapi"
+            },
+            "evidence": {
+              "keyword": "maxItems",
+              "limit": 3
+            },
+            "supportedFixes": [
+              "provide at most 3 item(s)"
+            ]
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "schema/maxItems",
+      "severity": "error",
+      "message": "/components/1/sources (id/label: \"fastapi\") must NOT have more than 3 items",
+      "subject": {
+        "diagramType": "architecture",
+        "path": "/components/1/sources",
+        "identity": "fastapi"
+      },
+      "evidence": {
+        "keyword": "maxItems",
+        "limit": 3
+      },
+      "supportedFixes": [
+        "provide at most 3 item(s)"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\review-4\\realtime-translation-architecture.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\review-4\\realtime-translation-architecture.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-10-31T11:58:04.874Z",
+  "durationMs": 568,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

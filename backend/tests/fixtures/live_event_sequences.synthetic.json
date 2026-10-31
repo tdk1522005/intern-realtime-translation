@@ -1,0 +1,82 @@
+{
+  "fixture_version": 1,
+  "source_kind": "hand_authored_synthetic_scenarios",
+  "notice": "These normalized events are mock test inputs, not captured Gemini SDK messages or claims about provider event semantics.",
+  "scenarios": [
+    {
+      "name": "two_turns_with_chunked_transcripts",
+      "purpose": "Check that two utterances stay separate and transcript chunks are joined in order.",
+      "events": [
+        {"type": "input_transcription", "text": "The meeting starts "},
+        {"type": "input_transcription", "text": "at nine."},
+        {"type": "output_transcription", "text": "Cuộc họp bắt đầu "},
+        {"type": "output_transcription", "text": "lúc chín giờ."},
+        {"type": "turn_complete"},
+        {"type": "input_transcription", "text": "Please take your seats."},
+        {"type": "output_transcription", "text": "Vui lòng vào chỗ ngồi."},
+        {"type": "turn_complete"}
+      ],
+      "expected_segments": [
+        {
+          "source_text": "The meeting starts at nine.",
+          "translated_text": "Cuộc họp bắt đầu lúc chín giờ."
+        },
+        {
+          "source_text": "Please take your seats.",
+          "translated_text": "Vui lòng vào chỗ ngồi."
+        }
+      ]
+    },
+    {
+      "name": "provisional_transcript_corrected_by_final",
+      "purpose": "Specify a future assembler case where a provisional snapshot is replaced by a corrected final snapshot.",
+      "events": [
+        {"type": "input_partial", "text": "The meeting starts at nine"},
+        {"type": "input_final", "text": "The meeting started at nine."},
+        {"type": "output_partial", "text": "Cuộc họp bắt đầu lúc chín giờ"},
+        {"type": "output_final", "text": "Cuộc họp bắt đầu lúc chín giờ."},
+        {"type": "turn_complete"}
+      ],
+      "expected_segments": [
+        {
+          "source_text": "The meeting started at nine.",
+          "translated_text": "Cuộc họp bắt đầu lúc chín giờ."
+        }
+      ]
+    },
+    {
+      "name": "stop_before_translation_arrives",
+      "purpose": "Specify source preservation when the user stops before translated text is available.",
+      "events": [
+        {"type": "input_transcription", "text": "I would like to add one more point"},
+        {"type": "stop"}
+      ],
+      "expected_segments": [
+        {
+          "source_text": "I would like to add one more point",
+          "translated_text": null,
+          "status": "failed"
+        }
+      ]
+    },
+    {
+      "name": "reconnect_keeps_database_session_sequence",
+      "purpose": "Specify that reconnect opens a new provider stream but appends later turns to the existing database session.",
+      "events": [
+        {"type": "provider_stream_start", "connection_number": 1},
+        {"type": "input_transcription", "text": "First sentence."},
+        {"type": "output_transcription", "text": "Câu thứ nhất."},
+        {"type": "turn_complete"},
+        {"type": "provider_stream_stop", "connection_number": 1},
+        {"type": "provider_stream_start", "connection_number": 2},
+        {"type": "input_transcription", "text": "Second sentence."},
+        {"type": "output_transcription", "text": "Câu thứ hai."},
+        {"type": "turn_complete"}
+      ],
+      "expected_segments": [
+        {"sequence_number": 1, "source_text": "First sentence.", "translated_text": "Câu thứ nhất."},
+        {"sequence_number": 2, "source_text": "Second sentence.", "translated_text": "Câu thứ hai."}
+      ]
+    }
+  ]
+}

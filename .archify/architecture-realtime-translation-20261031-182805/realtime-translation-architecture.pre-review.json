@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Kiến trúc dịch lời nói realtime Anh–Việt",
+    "output": ".archify/architecture-realtime-translation-20261031-182805/realtime-translation-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/tdk1522005/intern-realtime-translation.git",
+      "revision": "cda177123728b2eab4b4e2fbec7b6b215abe161d",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "live_ui",
+      "type": "frontend",
+      "label": "Trang thử microphone",
+      "sublabel": "/live · PCM16 mono 16 kHz",
+      "pos": [
+        40,
+        230
+      ],
+      "size": [
+        185,
+        82
+      ],
+      "sources": [
+        {
+          "path": "backend/live.html",
+          "line": 138,
+          "end_line": 163,
+          "label": "PCM audio"
+        },
+        {
+          "path": "backend/live.html",
+          "line": 284,
+          "end_line": 340,
+          "label": "Kết nối live"
+        },
+        {
+          "path": "backend/live.html",
+          "line": 369,
+          "end_line": 390,
+          "label": "Stop và flush"
+        }
+      ]
+    },
+    {
+      "id": "fastapi",
+      "type": "backend",
+      "label": "FastAPI orchestration",
+      "sublabel": "WebSocket live + REST lifecycle",
+      "pos": [
+        390,
+        220
+      ],
+      "size": [
+        220,
+        100
+      ],
+      "sources": [
+        {
+          "path": "backend/live_session_router.py",
+          "line": 360,
+          "end_line": 424,
+          "label": "WebSocket route"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 630,
+          "end_line": 735,
+          "label": "Audio ingress"
+        },
+        {
+          "path": "backend/main.py",
+          "line": 1042,
+          "end_line": 1270,
+          "label": "Finish + export"
+        }
+      ]
+    },
+    {
+      "id": "speech_controls",
+      "type": "backend",
+      "label": "VAD + ráp transcript",
+      "sublabel": "module nội bộ · cùng process",
+      "pos": [
+        390,
+        465
+      ],
+      "size": [
+        235,
+        92
+      ],
+      "sources": [
+        {
+          "path": "backend/audio_vad.py",
+          "line": 9,
+          "end_line": 91,
+          "label": "Energy VAD"
+        },
+        {
+          "path": "backend/transcript_assembler.py",
+          "line": 78,
+          "end_line": 190,
+          "label": "Snapshot + boundary"
+        },
+        {
+          "path": "backend/stop_drain.py",
+          "line": 9,
+          "end_line": 51,
+          "label": "Quiet window"
+        }
+      ]
+    },
+    {
+      "id": "gemini_live",
+      "type": "external",
+      "label": "Gemini Live",
+      "sublabel": "stream audio ↔ transcript/dịch",
+      "pos": [
+        780,
+        80
+      ],
+      "size": [
+        180,
+        88
+      ],
+      "sources": [
+        {
+          "path": "backend/gemini_live_service.py",
+          "line": 13,
+          "end_line": 18,
+          "label": "Live model"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 308,
+          "end_line": 324,
+          "label": "Live config"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 953,
+          "end_line": 980,
+          "label": "Provider connection"
+        }
+      ]
+    },
+    {
+      "id": "gemini_text",
+      "type": "external",
+      "label": "Gemini dịch văn bản",
+      "sublabel": "repair toàn câu · retry",
+      "pos": [
+        780,
+        390
+      ],
+      "size": [
+        190,
+        88
+      ],
+      "sources": [
+        {
+          "path": "backend/gemini_service.py",
+          "line": 29,
+          "end_line": 90,
+          "label": "Text translation"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 78,
+          "end_line": 103,
+          "label": "Stop repair"
+        }
+      ]
+    },
+    {
+      "id": "latency",
+      "type": "backend",
+      "label": "Latency metrics",
+      "sublabel": "audio→source · audio→translation · Stop",
+      "pos": [
+        780,
+        635
+      ],
+      "size": [
+        190,
+        90
+      ],
+      "sources": [
+        {
+          "path": "backend/latency_metrics.py",
+          "line": 21,
+          "end_line": 140,
+          "label": "Samples + p50/p95"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 1161,
+          "end_line": 1182,
+          "label": "Persist on Stop"
+        }
+      ]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "session · segment · metrics",
+      "pos": [
+        1080,
+        290
+      ],
+      "size": [
+        150,
+        96
+      ],
+      "sources": [
+        {
+          "path": "backend/database.py",
+          "line": 25,
+          "end_line": 81,
+          "label": "Schema"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "browser-live",
+      "from": "live_ui",
+      "to": "fastapi",
+      "label": "PCM16 stream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "live-events",
+      "from": "fastapi",
+      "to": "live_ui",
+      "label": "partial · final · stopped",
+      "variant": "default"
+    },
+    {
+      "id": "browser-transcript",
+      "from": "live_ui",
+      "to": "fastapi",
+      "label": "GET transcript đã lưu"
+    },
+    {
+      "id": "uses-speech-controls",
+      "from": "fastapi",
+      "to": "speech_controls",
+      "label": "RMS VAD · assembly · drain"
+    },
+    {
+      "id": "audio-to-gemini",
+      "from": "fastapi",
+      "to": "gemini_live",
+      "label": "PCM16 + boundaries",
+      "variant": "emphasis"
+    },
+    {
+      "id": "events-from-gemini",
+      "from": "gemini_live",
+      "to": "fastapi",
+      "label": "transcript + translation events",
+      "variant": "default"
+    },
+    {
+      "id": "live-text-repair",
+      "from": "fastapi",
+      "to": "gemini_text",
+      "label": "Stop repair / retry",
+      "variant": "dashed"
+    },
+    {
+      "id": "text-result",
+      "from": "gemini_text",
+      "to": "fastapi",
+      "label": "JSON en / vn",
+      "variant": "default"
+    },
+    {
+      "id": "api-db",
+      "from": "fastapi",
+      "to": "sqlite",
+      "label": "lưu segment theo sequence",
+      "variant": "emphasis"
+    },
+    {
+      "id": "db-api",
+      "from": "sqlite",
+      "to": "fastapi",
+      "label": "đọc transcript / trạng thái",
+      "variant": "default"
+    },
+    {
+      "id": "record-latency",
+      "from": "fastapi",
+      "to": "latency",
+      "label": "các mốc độ trễ"
+    },
+    {
+      "id": "latency-db",
+      "from": "latency",
+      "to": "sqlite",
+      "label": "latency samples"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Đường đi audio",
+      "items": [
+        "Browser đổi audio thành PCM16 mono 16 kHz rồi gửi liên tục qua WebSocket.",
+        "Backend dùng queue hữu hạn và cờ ActivityStart/ActivityEnd để giữ thứ tự và đánh dấu lượt nói.",
+        "VAD tính năng lượng RMS để nhận biết khoảng lặng; nó điều khiển ranh giới, không loại bỏ frame audio."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Giữ transcript và dừng an toàn",
+      "items": [
+        "TranscriptAssembler tách preview tạm khỏi text chuẩn, thay snapshot tích lũy mới hơn và bỏ snapshot cũ.",
+        "Khi Stop, backend xả hết frame trong FIFO rồi chờ transcript yên hoặc hết thời hạn.",
+        "Nếu source đã đủ nhưng bản dịch stream bị cụt, backend thử dịch lại toàn source; segment không đủ điều kiện được giữ ở failed."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "API sau phiên",
+      "items": [
+        "REST kiểm tra điều kiện trước khi finish session/presentation và xuất transcript EN/VN có thứ tự.",
+        "summary-input là dữ liệu bàn giao cho thành viên tích hợp T5; sơ đồ này không nói rằng T5 đã được chạy trong backend."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Đo hiệu năng và phạm vi nguồn",
+      "items": [
+        "Backend lưu mẫu audio→source, audio→translation và Stop→persist; báo cáo dùng nearest-rank p50/p95.",
+        "Nguồn được đối chiếu theo snapshot Git cục bộ của các file liên quan; snapshot không được đẩy lên GitHub và không thay đổi nhánh chính."
+      ]
+    }
+  ]
+}

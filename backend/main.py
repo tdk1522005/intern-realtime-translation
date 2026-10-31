@@ -2,18 +2,21 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 import database
 import gemini_service
 import gemini_live_service
+import latency_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,22 @@ app = FastAPI(
     description="Backend for English-Vietnamese live translation",
     version="0.4.0",
 )
+
+# Configure browser clients without allowing every website to access transcripts.
+# An empty list preserves the existing same-origin behavior.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Accept", "Content-Type"],
+    )
 
 
 # =========================================================
@@ -71,6 +90,15 @@ class PresentationResponse(BaseModel):
     presentation_id: str
     status: str
     started_at: str
+
+
+class PresentationStatusResponse(BaseModel):
+    presentation_id: str
+    status: str
+    started_at: str
+    ended_at: str | None
+    total_sessions: int
+    finished_sessions: int
 
 
 class SessionResponse(BaseModel):
@@ -138,6 +166,25 @@ class SummaryInputResponse(BaseModel):
     segments: list[SummarySegmentInput]
 
 
+class PresentationSessionSummaryInput(BaseModel):
+    session_id: str
+    session_number: int
+    segment_count: int
+    transcript_en: str
+    transcript_vn: str
+    segments: list[SummarySegmentInput]
+
+
+class PresentationSummaryInputResponse(BaseModel):
+    presentation_id: str
+    presentation_status: str
+    session_count: int
+    segment_count: int
+    transcript_en: str
+    transcript_vn: str
+    sessions: list[PresentationSessionSummaryInput]
+
+
 # =========================================================
 # Startup
 # =========================================================
@@ -158,6 +205,12 @@ def health_check():
         "service": "translation-backend",
         "version": "0.4.0",
     }
+
+
+@app.get("/api/v1/metrics/live-latency")
+def get_live_latency_metrics():
+    """Return recent p50/p95 latency samples collected by live sessions."""
+    return latency_metrics.read_latency_report()
 
 
 @app.get("/live", response_class=HTMLResponse, include_in_schema=False)
@@ -828,6 +881,41 @@ def _load_session_status(connection, session_id: str) -> SessionStatusResponse:
     )
 
 
+def _load_presentation_status(
+    connection,
+    presentation_id: str,
+) -> PresentationStatusResponse:
+    row = connection.execute(
+        """
+        SELECT
+            p.presentation_id,
+            p.status,
+            p.started_at,
+            p.ended_at,
+            COUNT(s.session_id) AS total_sessions,
+            COALESCE(SUM(CASE WHEN s.status = 'finished' THEN 1 ELSE 0 END), 0)
+                AS finished_sessions
+        FROM presentations AS p
+        LEFT JOIN sessions AS s ON s.presentation_id = p.presentation_id
+        WHERE p.presentation_id = ?
+        GROUP BY p.presentation_id
+        """,
+        (presentation_id,),
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Presentation not found.")
+
+    return PresentationStatusResponse(
+        presentation_id=row["presentation_id"],
+        status=row["status"],
+        started_at=row["started_at"],
+        ended_at=row["ended_at"],
+        total_sessions=row["total_sessions"] or 0,
+        finished_sessions=row["finished_sessions"] or 0,
+    )
+
+
 @app.get(
     "/api/v1/sessions/{session_id}",
     response_model=SessionStatusResponse,
@@ -969,6 +1057,129 @@ def get_session_summary_input(session_id: str):
         ) from exc
 
 
+@app.get(
+    "/api/v1/presentations/{presentation_id}/summary-input",
+    response_model=PresentationSummaryInputResponse,
+)
+def get_presentation_summary_input(presentation_id: str):
+    """Export all completed bilingual transcripts in presentation order for T5."""
+    try:
+        with database.get_connection() as connection:
+            status = _load_presentation_status(connection, presentation_id)
+            session_rows = connection.execute(
+                """
+                SELECT session_id, session_number, status
+                FROM sessions
+                WHERE presentation_id = ?
+                ORDER BY session_number ASC
+                """,
+                (presentation_id,),
+            ).fetchall()
+            segment_rows = connection.execute(
+                """
+                SELECT g.segment_id, g.session_id, g.sequence_number,
+                       g.source_text, g.source_language, g.en, g.vn, g.status,
+                       s.session_number
+                FROM segments AS g
+                JOIN sessions AS s ON s.session_id = g.session_id
+                WHERE s.presentation_id = ?
+                ORDER BY s.session_number ASC, g.sequence_number ASC
+                """,
+                (presentation_id,),
+            ).fetchall()
+
+        if status.status != "finished":
+            raise HTTPException(
+                status_code=409,
+                detail="Finish the presentation before exporting its summary input.",
+            )
+
+        if not session_rows:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot export summary input for a presentation without sessions.",
+            )
+
+        if any(session["status"] != "finished" for session in session_rows):
+            raise HTTPException(
+                status_code=409,
+                detail="Finish every session before exporting the presentation summary input.",
+            )
+
+        if not segment_rows:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot export summary input for an empty presentation.",
+            )
+
+        if any(
+            row["status"] != "completed" or not row["en"] or not row["vn"]
+            for row in segment_rows
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Every segment in the presentation must be completed before export.",
+            )
+
+        segments_by_session: dict[str, list[SummarySegmentInput]] = {
+            row["session_id"]: [] for row in session_rows
+        }
+        for row in segment_rows:
+            segments_by_session[row["session_id"]].append(
+                SummarySegmentInput(
+                    segment_id=row["segment_id"],
+                    sequence_number=row["sequence_number"],
+                    source_text=row["source_text"],
+                    source_language=row["source_language"],
+                    en=row["en"],
+                    vn=row["vn"],
+                )
+            )
+
+        sessions = [
+            PresentationSessionSummaryInput(
+                session_id=session["session_id"],
+                session_number=session["session_number"],
+                segment_count=len(segments_by_session[session["session_id"]]),
+                transcript_en=" ".join(
+                    segment.en for segment in segments_by_session[session["session_id"]]
+                ),
+                transcript_vn=" ".join(
+                    segment.vn for segment in segments_by_session[session["session_id"]]
+                ),
+                segments=segments_by_session[session["session_id"]],
+            )
+            for session in session_rows
+        ]
+        transcript_en = "\n".join(
+            session.transcript_en for session in sessions if session.transcript_en
+        )
+        transcript_vn = "\n".join(
+            session.transcript_vn for session in sessions if session.transcript_vn
+        )
+
+        return PresentationSummaryInputResponse(
+            presentation_id=status.presentation_id,
+            presentation_status=status.status,
+            session_count=len(sessions),
+            segment_count=len(segment_rows),
+            transcript_en=transcript_en,
+            transcript_vn=transcript_vn,
+            sessions=sessions,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Could not build summary input for presentation %s",
+            presentation_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build presentation summary input.",
+        ) from exc
+
+
 @app.post(
     "/api/v1/sessions/{session_id}/finish",
     response_model=SessionStatusResponse,
@@ -1029,6 +1240,59 @@ def finish_session(session_id: str):
         raise HTTPException(
             status_code=500,
             detail="Could not finish session.",
+        ) from exc
+
+
+@app.post(
+    "/api/v1/presentations/{presentation_id}/finish",
+    response_model=PresentationStatusResponse,
+)
+def finish_presentation(presentation_id: str):
+    """Close a presentation after each of its sessions has been finished."""
+    try:
+        with database.get_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            status = _load_presentation_status(connection, presentation_id)
+
+            if status.status == "finished":
+                return status
+
+            if status.status != "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only active presentations can be finished.",
+                )
+
+            if status.total_sessions == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot finish a presentation without sessions.",
+                )
+
+            if status.total_sessions != status.finished_sessions:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Finish every session before finishing the presentation.",
+                        "total_sessions": status.total_sessions,
+                        "finished_sessions": status.finished_sessions,
+                    },
+                )
+
+            ended_at = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                "UPDATE presentations SET status = ?, ended_at = ? "
+                "WHERE presentation_id = ?",
+                ("finished", ended_at, presentation_id),
+            )
+            return _load_presentation_status(connection, presentation_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not finish presentation %s", presentation_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not finish presentation.",
         ) from exc
 
 from live_session_router import router as live_session_router

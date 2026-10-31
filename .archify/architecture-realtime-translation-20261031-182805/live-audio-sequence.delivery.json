@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "5d349231-9496-419c-ac0a-09d6117c1911",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\live-audio-sequence.candidate.json",
+  "output": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\live-audio-sequence.html",
+  "specification": {
+    "sha256": "6a80b08303be030f4a52dd098a715c23b7709844b02aa8dfa2e12179e2d45fdb",
+    "bytes": 8121
+  },
+  "artifact": {
+    "sha256": "5f8323d2b123edd28780c6ec1b79c56d31dfeec6744744ef9fc60338d230e36b",
+    "bytes": 841752
+  }
+}

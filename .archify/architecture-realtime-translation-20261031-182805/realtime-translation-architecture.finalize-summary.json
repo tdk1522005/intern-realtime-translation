@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.candidate.json",
+    "sha256": "99287713d0153902fbbcbf1811317875fb30fb42bf8b3d3114157756bc035eaf",
+    "bytes": 8705
+  },
+  "artifact": {
+    "path": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.html",
+    "sha256": "672109b0a6496c83531fbb482bbbeceb5580e02c772e3020dfdf6cfb32ca4ac4",
+    "bytes": 850777
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.finalize.json",
+    "summaryReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\tdkha\\OneDrive\\Desktop\\INTERN\\.archify\\architecture-realtime-translation-20261031-182805\\realtime-translation-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-31T11:34:29.238Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 5628,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 1,
+      "routesOverSuggestedBends": 1
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "id": "live-text-repair",
+            "from": "fastapi",
+            "to": "gemini_text",
+            "label": "Stop repair / retry",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "right": {
+            "id": "db-api",
+            "from": "sqlite",
+            "to": "fastapi",
+            "label": "đọc transcript / trạng thái",
+            "collectionIndex": 9,
+            "artifactIndex": 10
+          },
+          "point": [
+            795.9999999999999,
+            276.8
+          ],
+          "sharedNode": "fastapi"
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "id": "record-latency",
+            "from": "fastapi",
+            "to": "latency",
+            "label": "các mốc độ trễ",
+            "collectionIndex": 10,
+            "artifactIndex": 11
+          },
+          "bends": 4,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "fastapi has 6 relationships facing its right side, which fits 5 ports: make that side at least 102px, or move some of those neighbours so they face another side of fastapi.",
+      "fastapi → gemini_text and sqlite → fastapi cross next to fastapi: move node gemini_text or sqlite so the two reach fastapi from different sides (for example one level with it, one directly above or below it).",
+      "fastapi → latency needs 4 bends: move node fastapi or latency so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

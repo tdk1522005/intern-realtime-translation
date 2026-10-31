@@ -1,0 +1,141 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Vòng đời segment và retry",
+    "output": ".archify/architecture-realtime-translation-20261031-182805/segment-retry-lifecycle.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/tdk1522005/intern-realtime-translation.git",
+      "revision": "604d631c0b179e575ed3053bc491a8c282219c32",
+      "link_mode": "local-only"
+    }
+  },
+  "mainPath": [
+    "received",
+    "completed"
+  ],
+  "states": [
+    {
+      "id": "received",
+      "type": "start",
+      "label": "received",
+      "sublabel": "source đã được giữ",
+      "tag": "đang dịch / chờ retry",
+      "step": "01",
+      "sources": [
+        {
+          "path": "backend/main.py",
+          "line": 453,
+          "end_line": 510,
+          "label": "Translate status"
+        },
+        {
+          "path": "backend/main.py",
+          "line": 667,
+          "end_line": 738,
+          "label": "Retry reset"
+        }
+      ]
+    },
+    {
+      "id": "completed",
+      "type": "success",
+      "label": "completed",
+      "sublabel": "source + bản dịch hợp lệ",
+      "tag": "terminal",
+      "step": "02",
+      "sources": [
+        {
+          "path": "backend/main.py",
+          "line": 453,
+          "end_line": 510,
+          "label": "Text segment result"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 157,
+          "end_line": 204,
+          "label": "Live validation"
+        }
+      ]
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "failed",
+      "sublabel": "giữ source để thử lại",
+      "tag": "retryable",
+      "sources": [
+        {
+          "path": "backend/main.py",
+          "line": 453,
+          "end_line": 510,
+          "label": "Provider error"
+        },
+        {
+          "path": "backend/main.py",
+          "line": 667,
+          "end_line": 738,
+          "label": "Retry eligibility"
+        },
+        {
+          "path": "backend/live_session_router.py",
+          "line": 157,
+          "end_line": 204,
+          "label": "Live incomplete result"
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "id": "received-completed",
+      "from": "received",
+      "to": "completed",
+      "label": "bản dịch đạt điều kiện",
+      "variant": "emphasis"
+    },
+    {
+      "id": "received-failed",
+      "from": "received",
+      "to": "failed",
+      "label": "lỗi dịch",
+      "variant": "security"
+    },
+    {
+      "id": "failed-received",
+      "from": "failed",
+      "to": "received",
+      "label": "retry",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Ý nghĩa trạng thái",
+      "items": [
+        "received có nghĩa source đã được nhận và chưa có kết quả cuối; trong lúc provider chạy hàng vẫn ở trạng thái này.",
+        "completed cần có source và bản dịch hợp lệ. Live segment thiếu bản dịch không bị đánh dấu thành công."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "received → failed · lỗi dịch",
+      "items": [
+        "Provider lỗi, translation rỗng/thiếu, hoặc output không qua kiểm tra sẽ đi sang failed.",
+        "Backend giữ source để người dùng có thể sửa hoặc gọi retry; không đánh dấu completed."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "failed → received · POST retry",
+      "items": [
+        "Chỉ retry segment đang failed và session vẫn active; segment completed không thể retry.",
+        "Backend xóa en/vn cũ, đặt status về received rồi gọi Gemini text dịch lại.",
+        "Nếu provider tiếp tục lỗi, source vẫn được giữ và segment trở lại failed."
+      ]
+    }
+  ]
+}
