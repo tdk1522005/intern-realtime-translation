@@ -9,7 +9,7 @@ Repo này chứa **backend core** nhận audio, dịch trực tiếp bằng Gemi
 | Thiện — web | [Bàn giao core](HANDOFF_CORE.md), [API contract](backend/INTEGRATION_GUIDE.md) | Microphone → WebSocket; hiển thị transcript/bản dịch; REST quản lý phiên. [Trang live mẫu](backend/live.html) chỉ để tham khảo. |
 | Linh — app | [Bàn giao core](HANDOFF_CORE.md), [API contract](backend/INTEGRATION_GUIDE.md) | Thu PCM16LE mono 16 kHz và dùng cùng WebSocket/REST contract. |
 | Thắng — T5 | [Bàn giao core](HANDOFF_CORE.md), [phần dữ liệu T5](backend/INTEGRATION_GUIDE.md#5-kết-thúc-phiên-và-dữ-liệu-cho-t5) | Đọc `GET /api/v1/presentations/{presentation_id}/summary-input` sau khi kết thúc presentation. |
-| Khánh — core | [Mục lục backend](backend/README.md), [kiến trúc agent](backend/AGENT_ARCHITECTURE.md), [trạng thái project](PROJECT_STATE.md) | Bảo trì API, VAD, transcript, lưu trữ, retry/reconnect và đo độ trễ. |
+| Khanh — core | [Mục lục backend](backend/README.md), [kiến trúc agent](backend/AGENT_ARCHITECTURE.md), [trạng thái project](PROJECT_STATE.md) | Bảo trì API, VAD, transcript, lưu trữ, retry/reconnect và đo độ trễ. |
 
 ## Chạy backend
 
